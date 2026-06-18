@@ -1,3 +1,15 @@
+process.on('uncaughtException', (err) => {
+    console.error('CRASH FATAL (uncaughtException):', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('REJEIÇÃO NÃO TRATADA:', reason);
+});
+
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
+
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { PrismaClient } = require('@prisma/client');
