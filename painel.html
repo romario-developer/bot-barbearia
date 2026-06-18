@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Painel do Barbeiro</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-hover: #1d4ed8;
+            --danger: #ef4444;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --bg: #0f172a; 
+            --card: #1e293b;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --border: #334155;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 10px;
+            padding-bottom: 30px;
+        }
+
+        .container {
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin: 15px 0 20px 0;
+        }
+
+        .header h1 {
+            font-size: 24px;
+            margin: 0 0 5px 0;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            margin: 0;
+            font-size: 14px;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 15px;
+            background: var(--card);
+            padding: 6px;
+            border-radius: 12px;
+            border: 1px solid var(--border);
+        }
+
+        .tab-btn {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+
+        .tab-btn.active {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+        }
+
+        .tab-content {
+            display: none;
+            background: var(--card);
+            padding: 16px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .tab-content h2 {
+            font-size: 18px;
+            margin-top: 0;
+            margin-bottom: 15px;
+            color: var(--text);
+            border-left: 4px solid var(--primary);
+            padding-left: 8px;
+        }
+
+        .item-lista {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .item-lista:last-child {
+            border-bottom: none;
+        }
+
+        .info-container {
+            flex: 1;
+            padding-right: 10px;
+        }
+
+        .hora-destaque {
+            font-size: 18px;
+            font-weight: bold;
+            margin-left: 8px;
+        }
+
+        .cliente-info {
+            margin-top: 4px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 1px dashed var(--border);
+        }
+
+        input {
+            padding: 12px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: white;
+            font-size: 15px;
+            width: 100%;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+
+        button {
+            padding: 12px 18px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            color: white;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+        }
+
+        .btn-add { background: var(--primary); width: 100%; }
+        .btn-update { background: var(--warning); width: 100%; }
+        .btn-danger { background: var(--danger); padding: 6px 12px; min-height: 35px; }
+        .btn-edit { background: var(--primary); padding: 6px 12px; min-height: 35px; margin-right: 5px; }
+        .btn-success { background: var(--success); }
+        
+        .acoes-lista {
+            display: flex;
+            align-items: center;
+        }
+
+        .badge {
+            padding: 4px 8px;
+            border-radius: 6px;
+            font-size: 11px;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .badge.livre { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .badge.ocupado { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+
+        .notif-banner {
+            display: none;
+            background: var(--success);
+            color: #0f172a;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: bold;
+            font-size: 13px;
+            margin-bottom: 15px;
+            animation: piscar 1s infinite alternate;
+        }
+
+        @keyframes piscar {
+            from { opacity: 0.7; }
+            to { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="header">
+        <h1>💈 Painel Mobile</h1>
+        <p>Gerenciamento em tempo real</p>
+    </div>
+
+    <div id="banner-notificacao" class="notif-banner">
+        🔔 AGENDA ATUALIZADA AGORA!
+    </div>
+
+    <div class="tabs">
+        <button id="btn-tab-agenda" class="tab-btn active" onclick="mudarAba('agenda')">📅 Agenda</button>
+        <button id="btn-tab-servicos" class="tab-btn" onclick="mudarAba('servicos')">✂️ Serviços</button>
+    </div>
+
+    <!-- ABA: AGENDA -->
+    <div id="agenda" class="tab-content active">
+        <h2>Horários de Hoje</h2>
+        <div id="lista-horarios">
+            <p style="color: var(--text-muted);">Carregando agenda...</p>
+        </div>
+    </div>
+
+    <!-- ABA: SERVIÇOS -->
+    <div id="servicos" class="tab-content">
+        <h2 id="titulo-form-servico">Novo Serviço</h2>
+        <div class="form-group">
+            <input type="hidden" id="idServico">
+            <input type="text" id="nomeServico" placeholder="Nome (ex: Degradê)">
+            <input type="text" id="precoServico" placeholder="Preço (ex: 35,00)">
+            <button id="btn-salvar-servico" class="btn-add" onclick="salvarServico()">💾 Salvar Serviço</button>
+        </div>
+
+        <h2>Cadastrados</h2>
+        <div id="lista-servicos">
+            <p style="color: var(--text-muted);">Carregando...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+    const IP_COMPUTADOR = window.location.hostname; 
+    
+    let API_URL = (IP_COMPUTADOR === 'localhost' || IP_COMPUTADOR === '127.0.0.1')
+        ? 'http://localhost:3000/api'
+        : 'https://bot-barbearia-129o.onrender.com/api'; // <--- Link corrigido com /api no final!
+
+    let ultimaAgendaString = ''; 
+    let abaAtual = 'agenda';
+    let audioAlerta = new Audio('https://assets.mixkit.co/active_storage/sfx/2869/2869-600.wav');
+
+    function mudarAba(abaId) {
+        abaAtual = abaId;
+        document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));
+        
+        document.getElementById(abaId).classList.add('active');
+        if(abaId === 'agenda') {
+            document.getElementById('btn-tab-agenda').classList.add('active');
+            carregarAgenda();
+        } else {
+            document.getElementById('btn-tab-servicos').classList.add('active');
+            carregarServicos();
+        }
+    }
+
+    async function checarAtualizacoes() {
+        if (abaAtual !== 'agenda') return; 
+        try {
+            const response = await fetch(`${API_URL}/horarios`);
+            const horarios = await response.json();
+            const stringAtual = JSON.stringify(horarios);
+
+            if (ultimaAgendaString === '') {
+                ultimaAgendaString = stringAtual;
+                renderizarAgenda(horarios);
+                return;
+            }
+
+            if (stringAtual !== ultimaAgendaString) {
+                ultimaAgendaString = stringAtual;
+                renderizarAgenda(horarios);
+                
+                audioAlerta.play().catch(e => console.log("Áudio aguardando interação."));
+                
+                const banner = document.getElementById('banner-notificacao');
+                banner.style.display = 'block';
+                setTimeout(() => { banner.style.display = 'none'; }, 5000);
+            }
+        } catch (error) {
+            console.error("Erro ao sincronizar dados:", error);
+        }
+    }
+
+    // ==========================================
+    // 📅 FUNÇÕES DA AGENDA
+    // ==========================================
+    async function carregarAgenda() {
+        try {
+            const response = await fetch(`${API_URL}/horarios`);
+            const horarios = await response.json();
+            ultimaAgendaString = JSON.stringify(horarios);
+            renderizarAgenda(horarios);
+        } catch (e) { console.error(e); }
+    }
+
+    function renderizarAgenda(horarios) {
+        const divLista = document.getElementById('lista-horarios');
+        if(horarios.length === 0) {
+            divLista.innerHTML = `<p style="color: var(--text-muted); text-align:center; padding: 20px;">Nenhum horário gerado hoje.</p>`;
+            return;
+        }
+
+        divLista.innerHTML = '';
+        horarios.forEach(h => {
+            const isLivre = h.status === 'disponivel';
+            const badgeClass = isLivre ? 'badge livre' : 'badge ocupado';
+            const badgeTexto = isLivre ? 'Livre' : 'Ocupado';
+            const infoCliente = isLivre ? 'Disponível para agendamento' : `<strong>${h.cliente}</strong><br>✂️ ${h.servico}`;
+            const botaoAcao = isLivre 
+                ? `<button class="btn-danger" onclick="mudarStatusHorario(${h.id}, 'ocupado')">Bloquear</button>`
+                : `<button class="btn-success" onclick="mudarStatusHorario(${h.id}, 'disponivel')">Liberar</button>`;
+
+            divLista.innerHTML += `
+                <div class="item-lista">
+                    <div class="info-container">
+                        <div>
+                            <span class="${badgeClass}">${badgeTexto}</span>
+                            <span class="hora-destaque">${h.hora}</span>
+                        </div>
+                        <div class="cliente-info">${infoCliente}</div>
+                    </div>
+                    <div>${botaoAcao}</div>
+                </div>
+            `;
+        });
+    }
+
+    async function mudarStatusHorario(id, novoStatus) {
+        await fetch(`${API_URL}/horarios/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: novoStatus })
+        });
+        carregarAgenda();
+    }
+
+    // ==========================================
+    // ✂️ FUNÇÕES DE SERVIÇOS
+    // ==========================================
+    async function carregarServicos() {
+        try {
+            const response = await fetch(`${API_URL}/servicos`);
+            const servicos = await response.json();
+            const divLista = document.getElementById('lista-servicos');
+            
+            divLista.innerHTML = '';
+            servicos.forEach(s => {
+                divLista.innerHTML += `
+                    <div class="item-lista">
+                        <div class="info-container">
+                            <strong>${s.nome}</strong><br>
+                            <span style="color: var(--success); font-weight: bold; font-size: 14px;">R$ ${s.preco}</span>
+                        </div>
+                        <div class="acoes-lista">
+                            <button class="btn-edit" onclick='prepararEdicao(${JSON.stringify(s)})'>Editar</button>
+                            <button class="btn-danger" onclick="removerServico(${s.id})">Apagar</button>
+                        </div>
+                    </div>
+                `;
+            });
+        } catch (e) { console.error(e); }
+    }
+
+    async function salvarServico() {
+        const id = document.getElementById('idServico').value;
+        const nome = document.getElementById('nomeServico').value;
+        const preco = document.getElementById('precoServico').value;
+
+        if(!nome || !preco) return alert("Preencha todos os campos!");
+
+        if (id) {
+            // Remove o registro antigo antes de criar o editado para manter compatibilidade com banco local simples
+            await fetch(`${API_URL}/servicos/${id}`, { method: 'DELETE' });
+        }
+
+        await fetch(`${API_URL}/servicos`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ nome, preco })
+        });
+
+        resetarFormularioServico();
+        carregarServicos(); 
+    }
+
+    function prepararEdicao(servico) {
+        document.getElementById('idServico').value = servico.id;
+        document.getElementById('nomeServico').value = servico.nome;
+        document.getElementById('precoServico').value = servico.preco;
+        
+        const btn = document.getElementById('btn-salvar-servico');
+        btn.className = 'btn-update';
+        btn.innerText = '🔄 Atualizar Serviço';
+        document.getElementById('titulo-form-servico').innerText = 'Editar Serviço';
+    }
+
+    function resetarFormularioServico() {
+        document.getElementById('idServico').value = '';
+        document.getElementById('nomeServico').value = '';
+        document.getElementById('precoServico').value = '';
+        
+        const btn = document.getElementById('btn-salvar-servico');
+        btn.className = 'btn-add';
+        btn.innerText = '💾 Salvar Serviço';
+        document.getElementById('titulo-form-servico').innerText = 'Novo Serviço';
+    }
+
+    async function removerServico(id) {
+        if(!confirm("Tem certeza que deseja apagar?")) return;
+        await fetch(`${API_URL}/servicos/${id}`, { method: 'DELETE' });
+        carregarServicos(); 
+    }
+
+    carregarAgenda();
+    setInterval(checarAtualizacoes, 4000);
+</script>
+
+</body>
+</html>

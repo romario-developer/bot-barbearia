@@ -1,0 +1,9 @@
+2026/06/18-14:09:53.137 1c40 Reusing MANIFEST C:\Users\Tina\Documents\prog\bot-barber\.wwebjs_auth\session\Default\Local Storage\leveldb/MANIFEST-000001
+2026/06/18-14:09:53.161 1c40 Recovering log #9
+2026/06/18-14:09:53.165 1c40 Reusing old log C:\Users\Tina\Documents\prog\bot-barber\.wwebjs_auth\session\Default\Local Storage\leveldb/000009.log 
+2026/06/18-14:10:53.179 3370 Level-0 table #13: started
+2026/06/18-14:10:53.191 3370 Level-0 table #13: 13884 bytes OK
+2026/06/18-14:10:53.196 3370 Delete type=0 #9
+2026/06/18-15:30:04.920 1c40 Level-0 table #15: started
+2026/06/18-15:30:04.935 1c40 Level-0 table #15: 14381 bytes OK
+2026/06/18-15:30:04.938 1c40 Delete type=0 #12

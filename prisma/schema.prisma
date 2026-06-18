@@ -1,0 +1,23 @@
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Servico {
+  id    Int    @id @default(autoincrement())
+  nome  String
+  preco String
+}
+
+model Horario {
+  id       Int     @id @default(autoincrement())
+  hora     String
+  status   String  // "disponivel" ou "ocupado"
+  cliente  String?
+  servico  String?
+  whatsapp String?
+}
