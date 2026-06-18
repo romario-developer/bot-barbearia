@@ -1,12 +1,12 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { PrismaClient } = require('@prisma/client');
-const express = require('express'); // 🌐 Importando Express
-const cors = require('cors');       // 🌐 Importando CORS
+const express = require('express'); 
+const cors = require('cors');       
 
 const prisma = new PrismaClient();
-const app = express();              // 🌐 Inicializando o servidor web
-const PORTA_API = process.env.PORTA || 3000;
+const app = express();              
+const PORTA_API = process.env.PORT || 3000; 
 
 // Configurações do Servidor Web
 app.use(cors());
@@ -15,12 +15,9 @@ app.use(express.json());
 // ==========================================
 // 🔒 NÚMEROS DE ADMINISTRADORES AUTORIZADOS
 // ==========================================
-// Apenas quem estiver nesta lista conseguirá interagir com o bot (seja como admin ou cliente)
 const NUMEROS_ADMIN = [
     "9848494243912",  
-    "73998487769",    // Número completo do barbeiro
-    
-    // IDs ocultos (LID) identificados no terminal:
+    "73998487769",    
     "207447037857844",
     "235498106822810",
     "170991909113907"
@@ -33,7 +30,6 @@ const dadosTemporarios = {};
 // 🌐 ROTAS DA API (Para o Painel Web)
 // ==========================================
 
-// 1. Pegar todos os serviços
 app.get('/api/servicos', async (req, res) => {
     try {
         const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
@@ -43,7 +39,6 @@ app.get('/api/servicos', async (req, res) => {
     }
 });
 
-// 2. Adicionar um novo serviço pelo Painel Web
 app.post('/api/servicos', async (req, res) => {
     try {
         const { nome, preco } = req.body;
@@ -54,7 +49,6 @@ app.post('/api/servicos', async (req, res) => {
     }
 });
 
-// 3. Deletar um serviço pelo Painel Web
 app.delete('/api/servicos/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -65,7 +59,6 @@ app.delete('/api/servicos/:id', async (req, res) => {
     }
 });
 
-// 4. Ver a Agenda Completa no Painel Web
 app.get('/api/horarios', async (req, res) => {
     try {
         const horarios = await prisma.horario.findMany({ orderBy: { id: 'asc' } });
@@ -75,7 +68,6 @@ app.get('/api/horarios', async (req, res) => {
     }
 });
 
-// 5. Bloquear/Liberar horário pelo Painel Web
 app.put('/api/horarios/:id', async (req, res) => {
     try {
         const { id } = req.params;
@@ -96,11 +88,10 @@ app.put('/api/horarios/:id', async (req, res) => {
     }
 });
 
-// Iniciando o servidor da API
+// Iniciando o servidor da API (Preparado para a Nuvem)
 app.listen(PORTA_API, '0.0.0.0', () => {
-    console.log(`🌐 Servidor rodando na porta ${PORTA_API}`);
+    console.log(`🌐 [API]: Servidor Web ativo na porta: ${PORTA_API}`);
 });
-
 
 // ==========================================
 // 🤖 CÓDIGO DO BOT DO WHATSAPP
@@ -168,27 +159,23 @@ function gerarHorarios(horaInicio, horaFim, intervaloMinutos) {
 client.on('message', async (msg) => {
     const chatId = msg.from;
 
-    // Ignora grupos completamente
     if (chatId.endsWith('@g.us')) return; 
 
     const contato = await msg.getContact();
     const numeroReal = contato.number || ""; 
     
-    // 🔒 CHECAGEM DE SEGURANÇA MÁXIMA E ESTRITA
     const eAdmin = NUMEROS_ADMIN.some(num => {
         return chatId === num || 
                numeroReal === num || 
-               chatId.includes(num + '@') || // Garante correspondência exata antes do @ do ID
-               numeroReal.endsWith(num);     // Garante correspondência exata do fim do número de telefone
+               chatId.includes(num + '@') || 
+               numeroReal.endsWith(num);     
     });
 
-    // 🛑 CORTE DE SEGURANÇA NO TOPO: Se não for admin cadastrado, o bot morre aqui e não faz nada!
     if (!eAdmin) {
         console.log(`🚫 Bloqueado Total -> ID do Chat: [${chatId}] | Número Real: [${numeroReal}]`);
         return; 
     }
 
-    // A partir daqui, APENAS os números autorizados rodam o código abaixo (seja para simular cliente ou acessar admin)
     const textoRecebido = msg.body.trim().toLowerCase();
     const nomeCliente = contato.pushname || "Cliente";
 
@@ -363,9 +350,6 @@ client.on('message', async (msg) => {
         return mostrarMenuAdmin(msg, chatId);
     }
 
-    // ==========================================
-    // 👤 SIMULAÇÃO DO FLUXO DO CLIENTE (Apenas para Admins testarem)
-    // ==========================================
     if (estadosUsuarios[chatId] === 'AGUARDANDO_HORARIO') {
         const opcao = parseInt(textoRecebido);
         if (isNaN(opcao)) {
