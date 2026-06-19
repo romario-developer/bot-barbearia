@@ -258,11 +258,7 @@
 </div>
 
 <script>
-    const IP_COMPUTADOR = window.location.hostname; 
-    
-    let API_URL = (IP_COMPUTADOR === 'localhost' || IP_COMPUTADOR === '127.0.0.1')
-        ? 'http://localhost:3000/api'
-        : 'https://bot-barbearia-129o.onrender.com/api'; // <--- Link corrigido com /api no final!
+   const API_URL = 'https://bot-barbearia-129o.onrender.com/api';
 
     let ultimaAgendaString = ''; 
     let abaAtual = 'agenda';
