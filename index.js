@@ -1,5 +1,5 @@
 // ==========================================
-// 🚨 TRATAMENTO DE ERROS GLOBAIS (Evita que o bot morra silenciosamente)
+// 🚨 TRATAMENTO DE ERROS GLOBAIS
 // ==========================================
 process.on('uncaughtException', (err) => {
     console.error('CRASH FATAL (uncaughtException):', err);
@@ -20,15 +20,11 @@ const cors = require('cors');
 
 const prisma = new PrismaClient();
 const app = express();              
-const PORTA_API = process.env.PORT || 10000; // Render usa dinâmico, mas deixamos 10000 como fallback
+const PORTA_API = process.env.PORT || 10000; 
 
-// Configurações do Servidor Web
 app.use(cors());
 app.use(express.json());
 
-// ==========================================
-// 🔒 DADOS GERAIS E CONFIGURAÇÕES DO BOT
-// ==========================================
 const NUMEROS_ADMIN = [
     "9848494243912",  
     "73998487769",    
@@ -40,18 +36,20 @@ const NUMEROS_ADMIN = [
 const estadosUsuarios = {};
 const dadosTemporarios = {}; 
 
+// ==========================================
+// 🤖 CONFIGURAÇÃO DO BOT (Limpa e Otimizada)
+// ==========================================
 const client = new Client({
     authStrategy: new LocalAuth(),
-    authTimeoutMs: 120000, // Dá 2 minutos para o bot tentar autenticar
     puppeteer: {
         headless: true,
-        protocolTimeout: 300000, // Dá 5 minutos para o Chrome do Render responder
-        timeout: 120000, // Dá 2 minutos para carregar a página pesada do WhatsApp
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, 
+        timeout: 0,         // Sem limite de tempo para carregar
+        protocolTimeout: 0, // Sem limite de protocolo
+        // EXECUTABLE PATH REMOVIDO DAQUI
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
+            '--disable-dev-shm-usage', // Impede o Chrome de estourar a RAM
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
@@ -60,21 +58,13 @@ const client = new Client({
     }
 });
 
-// Monitor de carregamento do WhatsApp
-client.on('loading_screen', (percent, message) => {
-    console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
-});
-
-// Monitor de carregamento do WhatsApp (Mantenha este bloco que você adicionou antes)
 client.on('loading_screen', (percent, message) => {
     console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
 });
 
 // ==========================================
-// 🌐 ROTAS DA API (Para o Painel Web)
+// 🌐 ROTAS DA API
 // ==========================================
-
-// Rota de Health Check (Essencial para o Render não dar timeout)
 app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.get('/api/servicos', async (req, res) => {
@@ -136,9 +126,8 @@ app.put('/api/horarios/:id', async (req, res) => {
 });
 
 // ==========================================
-// 🤖 EVENTOS DO BOT DO WHATSAPP
+// 🤖 EVENTOS DO BOT
 // ==========================================
-
 client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true });
     console.log('🤖 [Bot]: QR Code gerado! Escaneie com o WhatsApp da Barbearia.');
@@ -197,46 +186,33 @@ function gerarHorarios(horaInicio, horaFim, intervaloMinutos) {
 
 client.on('message', async (msg) => {
     const chatId = msg.from;
-
     if (chatId.endsWith('@g.us')) return; 
 
     const contato = await msg.getContact();
     const numeroReal = contato.number || ""; 
     
     const eAdmin = NUMEROS_ADMIN.some(num => {
-        return chatId === num || 
-               numeroReal === num || 
-               chatId.includes(num + '@') || 
-               numeroReal.endsWith(num);     
+        return chatId === num || numeroReal === num || chatId.includes(num + '@') || numeroReal.endsWith(num);     
     });
 
-    if (!eAdmin) {
-        console.log(`🚫 Bloqueado Total -> ID do Chat: [${chatId}] | Número Real: [${numeroReal}]`);
-        return; 
-    }
+    if (!eAdmin) return; 
 
     const textoRecebido = msg.body.trim().toLowerCase();
     const nomeCliente = contato.pushname || "Cliente";
 
-    if (textoRecebido === '!admin') {
-        return mostrarMenuAdmin(msg, chatId);
-    }
+    if (textoRecebido === '!admin') return mostrarMenuAdmin(msg, chatId);
 
     if (estadosUsuarios[chatId] === 'ADMIN_PAINEL') {
         switch(textoRecebido) {
             case '1': 
                 const todosHorarios = await prisma.horario.findMany({ orderBy: { id: 'asc' } });
                 let agenda = `📅 *AGENDA DE HOJE*\n\n`;
-                
                 if (todosHorarios.length === 0) {
-                    agenda += `⚠️ Nenhum horário configurado para hoje. Use a opção [ 6 ] para gerar a agenda.`;
+                    agenda += `⚠️ Nenhum horário configurado. Use a opção [ 6 ].`;
                 } else {
                     todosHorarios.forEach(h => {
-                        if (h.status === 'disponivel') {
-                            agenda += `🟢 ${h.hora} - Livre (ID: ${h.id})\n`;
-                        } else {
-                            agenda += `🔴 ${h.hora} - ${h.cliente} (${h.servico})\n`;
-                        }
+                        if (h.status === 'disponivel') agenda += `🟢 ${h.hora} - Livre (ID: ${h.id})\n`;
+                        else agenda += `🔴 ${h.hora} - ${h.cliente} (${h.servico})\n`;
                     });
                 }
                 await msg.reply(agenda);
@@ -246,222 +222,101 @@ client.on('message', async (msg) => {
                 estadosUsuarios[chatId] = 'ADMIN_BLOQUEAR';
                 const livresParaBloqueio = await prisma.horario.findMany({ where: { status: 'disponivel' }, orderBy: { id: 'asc' } });
                 let menuBloqueio = `🔒 *Qual horário quer BLOQUEAR?*\n\n`;
-                livresParaBloqueio.forEach(h => {
-                    menuBloqueio += `[ ${h.id} ] - ${h.hora}\n`;
-                });
-                return msg.reply(menuBloqueio + `\n👉 Digite o número correspondente:`);
+                livresParaBloqueio.forEach(h => menuBloqueio += `[ ${h.id} ] - ${h.hora}\n`);
+                return msg.reply(menuBloqueio + `\n👉 Digite o número:`);
 
             case '3': 
                 estadosUsuarios[chatId] = 'ADMIN_LIBERAR';
                 const ocupadosParaLiberar = await prisma.horario.findMany({ where: { status: 'ocupado' }, orderBy: { id: 'asc' } });
                 let menuLiberar = `🔓 *Qual horário quer LIBERAR?*\n\n`;
-                ocupadosParaLiberar.forEach(h => {
-                    menuLiberar += `[ ${h.id} ] - ${h.hora} (${h.cliente})\n`;
-                });
-                menuLiberar += `\n*[ T ]* - Liberar TODOS de uma vez (Zerar a agenda do dia)`;
+                ocupadosParaLiberar.forEach(h => menuLiberar += `[ ${h.id} ] - ${h.hora} (${h.cliente})\n`);
+                menuLiberar += `\n*[ T ]* - Liberar TODOS`;
                 return msg.reply(menuLiberar + `\n\n👉 Digite o número ou 'T':`);
 
             case '4': 
                 estadosUsuarios[chatId] = 'ADMIN_ADD_SERVICO';
-                return msg.reply(`✂️ *ADICIONAR SERVIÇO*\n\nDigite o nome e o valor separados por traço.\n*Exemplo:* Luzes Platinadas - 50,00`);
+                return msg.reply(`✂️ *ADICIONAR SERVIÇO*\nEx: Luzes Platinadas - 50,00`);
 
             case '5': 
                 estadosUsuarios[chatId] = 'ADMIN_REM_SERVICO';
                 const todosServicosRemover = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
                 let menuRemover = `❌ *Qual serviço quer APAGAR?*\n\n`;
-                todosServicosRemover.forEach(s => {
-                    menuRemover += `[ ${s.id} ] - ${s.nome}\n`;
-                });
+                todosServicosRemover.forEach(s => menuRemover += `[ ${s.id} ] - ${s.nome}\n`);
                 return msg.reply(menuRemover + `\n👉 Digite o número:`);
 
             case '6': 
                 estadosUsuarios[chatId] = 'ADMIN_CONFIG_AGENDA';
-                let msgConfig = `🕒 *CONFIGURAR AGENDA*\n\n`;
-                msgConfig += `⚠️ *Aviso:* Isso vai apagar a agenda atual e criar uma nova.\n\n`;
-                msgConfig += `Digite: *HoraAbertura - HoraFechamento - MinutosPorCorte*\n`;
-                msgConfig += `*Exemplo:* 09:00 - 18:00 - 45\n\n`;
-                msgConfig += `*(Para cancelar, digite 0)*`;
-                return msg.reply(msgConfig);
+                return msg.reply(`🕒 *CONFIGURAR AGENDA*\nExemplo: 09:00 - 18:00 - 45`);
 
             case '0': 
                 delete estadosUsuarios[chatId];
-                return msg.reply(`✅ Você saiu do painel. O bot voltou a funcionar normalmente.`);
+                return msg.reply(`✅ Saiu do painel.`);
 
             default:
-                return msg.reply(`❌ Opção inválida. Digite um número de 0 a 6.`);
+                return msg.reply(`❌ Opção inválida.`);
         }
     }
 
     if (estadosUsuarios[chatId] === 'ADMIN_BLOQUEAR') {
         const idEscolhido = parseInt(textoRecebido);
-        if (isNaN(idEscolhido)) {
-            await msg.reply(`❌ Entrada inválida! Você precisa digitar o número identificador do horário.`);
-            return mostrarMenuAdmin(msg, chatId);
-        }
         const horario = await prisma.horario.findUnique({ where: { id: idEscolhido } });
         if (horario && horario.status === 'disponivel') {
-            await prisma.horario.update({
-                where: { id: idEscolhido },
-                data: { status: 'ocupado', cliente: 'Presencial/Balcão', servico: 'Não especificado' }
-            });
-            await msg.reply(`✅ Horário das ${horario.hora} bloqueado!`);
-        } else {
-            await msg.reply(`❌ Horário inválido ou já ocupado.`);
-        }
+            await prisma.horario.update({ where: { id: idEscolhido }, data: { status: 'ocupado', cliente: 'Presencial', servico: 'Balcão' } });
+            await msg.reply(`✅ Bloqueado!`);
+        } else await msg.reply(`❌ Inválido.`);
         return mostrarMenuAdmin(msg, chatId);
     }
 
     if (estadosUsuarios[chatId] === 'ADMIN_LIBERAR') {
         if (textoRecebido === 't') {
-            await prisma.horario.updateMany({
-                data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null }
-            });
-            await msg.reply(`✅ TODOS os horários foram liberados! A agenda do dia foi zerada.`);
+            await prisma.horario.updateMany({ data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null } });
+            await msg.reply(`✅ TODOS liberados!`);
             return mostrarMenuAdmin(msg, chatId);
         }
         const idEscolhido = parseInt(textoRecebido);
-        if (isNaN(idEscolhido)) {
-            await msg.reply(`❌ Entrada inválida! Digite o número correspondente ao horário ou 'T' para limpar tudo.`);
-            return mostrarMenuAdmin(msg, chatId);
-        }
         const horario = await prisma.horario.findUnique({ where: { id: idEscolhido } });
         if (horario && horario.status === 'ocupado') {
-            await prisma.horario.update({
-                where: { id: idEscolhido },
-                data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null }
-            });
-            await msg.reply(`✅ Horário das ${horario.hora} liberado com sucesso!`);
-        } else {
-            await msg.reply(`❌ Horário inválido ou já está livre.`);
-        }
+            await prisma.horario.update({ where: { id: idEscolhido }, data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null } });
+            await msg.reply(`✅ Liberado!`);
+        } else await msg.reply(`❌ Inválido.`);
         return mostrarMenuAdmin(msg, chatId);
     }
 
     if (estadosUsuarios[chatId] === 'ADMIN_CONFIG_AGENDA') {
-        if (textoRecebido === '0') return mostrarMenuAdmin(msg, chatId);
         let partes = msg.body.split('-');
         if (partes.length === 3) {
-            let horaInicio = partes[0].trim();
-            let horaFim = partes[1].trim();
-            let intervalo = parseInt(partes[2].trim());
-            if (isNaN(intervalo) || !horaInicio.includes(':') || !horaFim.includes(':')) {
-                await msg.reply(`❌ Formato inválido. Siga o exemplo: 09:00 - 18:00 - 45`);
-            } else {
-                const novosSlots = gerarHorarios(horaInicio, horaFim, intervalo);
-                await prisma.horario.deleteMany();
-                for (const slot of novosSlots) {
-                    await prisma.horario.create({ data: slot });
-                }
-                await msg.reply(`✅ Agenda gerada com sucesso! Você tem ${novosSlots.length} horários criados no banco de dados.`);
-            }
-        } else {
-            await msg.reply(`❌ Formato errado. Use os traços. Exemplo: 09:00 - 18:00 - 45`);
-        }
+            const novosSlots = gerarHorarios(partes[0].trim(), partes[1].trim(), parseInt(partes[2].trim()));
+            await prisma.horario.deleteMany();
+            for (const slot of novosSlots) await prisma.horario.create({ data: slot });
+            await msg.reply(`✅ Agenda gerada!`);
+        } else await msg.reply(`❌ Formato errado.`);
         return mostrarMenuAdmin(msg, chatId);
     }
 
     if (estadosUsuarios[chatId] === 'ADMIN_ADD_SERVICO') {
         let partes = msg.body.split('-');
         if (partes.length === 2) {
-            await prisma.servico.create({
-                data: { nome: partes[0].trim(), preco: partes[1].trim() }
-            });
-            await msg.reply(`✅ Serviço adicionado: *${partes[0].trim()}* por R$ ${partes[1].trim()}`);
-        } else {
-            await msg.reply(`❌ Formato errado. Use o traço. Ex: Platinado - 60,00`);
+            await prisma.servico.create({ data: { nome: partes[0].trim(), preco: partes[1].trim() } });
+            await msg.reply(`✅ Adicionado!`);
         }
         return mostrarMenuAdmin(msg, chatId);
     }
 
     if (estadosUsuarios[chatId] === 'ADMIN_REM_SERVICO') {
         const idEscolhido = parseInt(textoRecebido);
-        if (isNaN(idEscolhido)) {
-            await msg.reply(`❌ Operação cancelada ou inválida. Retornando ao painel.`);
-            return mostrarMenuAdmin(msg, chatId);
-        }
         const servicoExistente = await prisma.servico.findUnique({ where: { id: idEscolhido } });
         if (servicoExistente) {
             await prisma.servico.delete({ where: { id: idEscolhido } });
-            await msg.reply(`✅ Serviço *${servicoExistente.nome}* apagado do banco de dados!`);
-        } else {
-            await msg.reply(`❌ Número de serviço não encontrado.`);
+            await msg.reply(`✅ Apagado!`);
         }
         return mostrarMenuAdmin(msg, chatId);
     }
-
-    if (estadosUsuarios[chatId] === 'AGUARDANDO_HORARIO') {
-        const opcao = parseInt(textoRecebido);
-        if (isNaN(opcao)) {
-            return msg.reply("❌ Ops! Não entendi. Por favor, digite apenas o *número* do horário (ex: 1, 2, 3).");
-        }
-        const horarioEscolhido = await prisma.horario.findFirst({ where: { id: opcao, status: 'disponivel' } });
-
-        if (horarioEscolhido) {
-            const horarioAtualizado = await prisma.horario.update({
-                where: { id: horarioEscolhido.id },
-                data: {
-                    status: 'ocupado',
-                    cliente: nomeCliente,
-                    servico: dadosTemporarios[chatId].nome,
-                    whatsapp: chatId
-                }
-            });
-            delete estadosUsuarios[chatId];
-            delete dadosTemporarios[chatId];
-            return msg.reply(`✅ *Agendamento Confirmado!*\n\n💈 *Barbearia*\n👤 *Cliente:* ${nomeCliente}\n✂️ *Serviço:* ${horarioAtualizado.servico}\n⏰ *Horário:* ${horarioAtualizado.hora}\n\nObrigado! Te esperamos na barbearia.`);
-        } else {
-            return msg.reply("❌ *Opção inválida.* Esse número de horário não existe ou já foi marcado. Digite outro número:");
-        }
-    }
-
-    if (estadosUsuarios[chatId] === 'AGUARDANDO_SERVICO') {
-        const opcaoServico = parseInt(textoRecebido);
-        if (isNaN(opcaoServico)) {
-            return msg.reply("❌ Ops! Não entendi. Por favor, digite apenas o *número* do serviço que deseja (ex: 1, 2).");
-        }
-        const servicoEscolhido = await prisma.servico.findUnique({ where: { id: opcaoServico } });
-
-        if (servicoEscolhido) {
-            dadosTemporarios[chatId] = servicoEscolhido; 
-            estadosUsuarios[chatId] = 'AGUARDANDO_HORARIO';
-            const listagemDisponiveis = await prisma.horario.findMany({ where: { status: 'disponivel' }, orderBy: { id: 'asc' } });
-            
-            if (listagemDisponiveis.length === 0) {
-                delete estadosUsuarios[chatId];
-                delete dadosTemporarios[chatId];
-                return msg.reply(`Poxa, *${nomeCliente}*! Todos os nossos horários de hoje já estão lotados. 😔`);
-            }
-
-            let msgHorarios = `Ótima escolha! Você selecionou *${servicoEscolhido.nome}*.\n\nEstes são os horários livres:\n\n`;
-            listagemDisponiveis.forEach(h => {
-                msgHorarios += `*[ ${h.id} ]* - às ${h.hora}\n`;
-            });
-            msgHorarios += `\n👉 Digite o *número* do horário que deseja.`;
-            return msg.reply(msgHorarios); 
-        } else {
-            return msg.reply("❌ *Serviço não encontrado.* Digite apenas um dos números que aparecem na lista.");
-        }
-    }
-
-    estadosUsuarios[chatId] = 'AGUARDANDO_SERVICO';
-    const todosServicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
-    let boasVindas = `Olá, *${nomeCliente}*! Bem-vindo à nossa Barbearia. 💈\n\n`;
-    boasVindas += `O que vamos fazer no visual hoje?\n\n`;
-    todosServicos.forEach(s => {
-        boasVindas += `*[ ${s.id} ]* - ${s.nome} (R$ ${s.preco})\n`;
-    });
-    boasVindas += `\n👉 *Digite o número* do serviço desejado.`;
-    await msg.reply(boasVindas);
 });
 
 // ==========================================
-// 🚀 INICIALIZAÇÃO GERAL
+// 🚀 INICIALIZAÇÃO
 // ==========================================
-
-// O servidor web (API) deve iniciar primeiro para evitar que o Render desista por timeout.
 app.listen(PORTA_API, '0.0.0.0', () => {
     console.log(`🌐 [API]: Servidor Web ativo na porta: ${PORTA_API}`);
-    
-    // Somente depois que o Express está respondendo, ligamos o WhatsApp pesado
     client.initialize();
 });
