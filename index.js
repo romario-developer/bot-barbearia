@@ -42,7 +42,7 @@ const dadosTemporarios = {};
 const client = new Client({
     authStrategy: new LocalAuth(),
     webVersionCache: {
-        type: 'remote', strict: true // Impede o Puppeteer de baixar o HTML do WA na RAM
+        type: 'none' // Desativa totalmente o cache para economizar a RAM do Render
     },
     puppeteer: {
         headless: true,
@@ -56,10 +56,10 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--disable-gpu',
-            '--disable-extensions', // NOVO: Desativa extensões padrão
-            '--disable-software-rasterizer', // NOVO: Alivia processamento gráfico
-            '--mute-audio', // NOVO: Desativa engine de som
-            '--js-flags="--max-old-space-size=250"' // NOVO: Limita o garbage collector do Node
+            '--disable-extensions',
+            '--disable-software-rasterizer',
+            '--mute-audio',
+            '--js-flags="--max-old-space-size=250"'
         ]
     }
 });
