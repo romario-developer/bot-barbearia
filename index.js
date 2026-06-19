@@ -41,18 +41,25 @@ const dadosTemporarios = {};
 // ==========================================
 const client = new Client({
     authStrategy: new LocalAuth(),
+    webVersionCache: {
+        type: 'remote', strict: true // Impede o Puppeteer de baixar o HTML do WA na RAM
+    },
     puppeteer: {
         headless: true,
-        timeout: 0,         // Desativa o timeout de carregamento
-        protocolTimeout: 0, // Desativa o timeout de protocolo
+        timeout: 0,
+        protocolTimeout: 0,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // FUNDAMENTAL: Impede o Chrome de usar muita memória RAM
+            '--disable-dev-shm-usage',
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--disable-extensions', // NOVO: Desativa extensões padrão
+            '--disable-software-rasterizer', // NOVO: Alivia processamento gráfico
+            '--mute-audio', // NOVO: Desativa engine de som
+            '--js-flags="--max-old-space-size=250"' // NOVO: Limita o garbage collector do Node
         ]
     }
 });
