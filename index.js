@@ -42,8 +42,12 @@ const dadosTemporarios = {};
 
 const client = new Client({
     authStrategy: new LocalAuth(),
+    authTimeoutMs: 120000, // Dá 2 minutos para o bot tentar autenticar
     puppeteer: {
         headless: true,
+        protocolTimeout: 300000, // Dá 5 minutos para o Chrome do Render responder
+        timeout: 120000, // Dá 2 minutos para carregar a página pesada do WhatsApp
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, 
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -51,10 +55,19 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process',
             '--disable-gpu'
         ]
     }
+});
+
+// Monitor de carregamento do WhatsApp
+client.on('loading_screen', (percent, message) => {
+    console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
+});
+
+// Monitor de carregamento do WhatsApp (Mantenha este bloco que você adicionou antes)
+client.on('loading_screen', (percent, message) => {
+    console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
 });
 
 // ==========================================
