@@ -37,19 +37,18 @@ const estadosUsuarios = {};
 const dadosTemporarios = {}; 
 
 // ==========================================
-// 🤖 CONFIGURAÇÃO DO BOT (Limpa e Otimizada)
+// 🤖 CONFIGURAÇÃO DO BOT (100% Otimizada para o Render)
 // ==========================================
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
         headless: true,
-        timeout: 0,         // Sem limite de tempo para carregar
-        protocolTimeout: 0, // Sem limite de protocolo
-        // EXECUTABLE PATH REMOVIDO DAQUI
+        timeout: 0,         // Desativa o timeout de carregamento
+        protocolTimeout: 0, // Desativa o timeout de protocolo
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage', // Impede o Chrome de estourar a RAM
+            '--disable-dev-shm-usage', // FUNDAMENTAL: Impede o Chrome de usar muita memória RAM
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
@@ -58,6 +57,7 @@ const client = new Client({
     }
 });
 
+// Monitor de carregamento do WhatsApp
 client.on('loading_screen', (percent, message) => {
     console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
 });
