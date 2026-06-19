@@ -43,7 +43,8 @@ const dadosTemporarios = {};
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: { 
-        args: ['--no-sandbox', '--disable-setuid-sandbox'] // OBRIGATÓRIO PARA RODAR NO RENDER (LINUX)
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH, // Isso será configurado no Render a seguir
+        args: ['--no-sandbox', '--disable-setuid-sandbox'] 
     }
 });
 
