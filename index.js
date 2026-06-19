@@ -1,3 +1,6 @@
+// ==========================================
+// 🚨 TRATAMENTO DE ERROS GLOBAIS (Evita que o bot morra silenciosamente)
+// ==========================================
 process.on('uncaughtException', (err) => {
     console.error('CRASH FATAL (uncaughtException):', err);
 });
@@ -6,10 +9,9 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('REJEIÇÃO NÃO TRATADA:', reason);
 });
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
-
-
-
+// ==========================================
+// 📦 IMPORTAÇÕES
+// ==========================================
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { PrismaClient } = require('@prisma/client');
@@ -18,14 +20,14 @@ const cors = require('cors');
 
 const prisma = new PrismaClient();
 const app = express();              
-const PORTA_API = process.env.PORT || 3000; 
+const PORTA_API = process.env.PORT || 10000; // Render usa dinâmico, mas deixamos 10000 como fallback
 
 // Configurações do Servidor Web
 app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 🔒 NÚMEROS DE ADMINISTRADORES AUTORIZADOS
+// 🔒 DADOS GERAIS E CONFIGURAÇÕES DO BOT
 // ==========================================
 const NUMEROS_ADMIN = [
     "9848494243912",  
@@ -38,9 +40,19 @@ const NUMEROS_ADMIN = [
 const estadosUsuarios = {};
 const dadosTemporarios = {}; 
 
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { 
+        args: ['--no-sandbox', '--disable-setuid-sandbox'] // OBRIGATÓRIO PARA RODAR NO RENDER (LINUX)
+    }
+});
+
 // ==========================================
 // 🌐 ROTAS DA API (Para o Painel Web)
 // ==========================================
+
+// Rota de Health Check (Essencial para o Render não dar timeout)
+app.get('/health', (req, res) => res.status(200).send('OK'));
 
 app.get('/api/servicos', async (req, res) => {
     try {
@@ -100,17 +112,9 @@ app.put('/api/horarios/:id', async (req, res) => {
     }
 });
 
-// Iniciando o servidor da API (Preparado para a Nuvem)
-app.listen(PORTA_API, '0.0.0.0', () => {
-    console.log(`🌐 [API]: Servidor Web ativo na porta: ${PORTA_API}`);
-});
-
 // ==========================================
-// 🤖 CÓDIGO DO BOT DO WHATSAPP
+// 🤖 EVENTOS DO BOT DO WHATSAPP
 // ==========================================
-const client = new Client({
-    authStrategy: new LocalAuth()
-});
 
 client.on('qr', (qr) => {
     qrcode.generate(qr, { small: true });
@@ -427,4 +431,14 @@ client.on('message', async (msg) => {
     await msg.reply(boasVindas);
 });
 
-client.initialize();
+// ==========================================
+// 🚀 INICIALIZAÇÃO GERAL
+// ==========================================
+
+// O servidor web (API) deve iniciar primeiro para evitar que o Render desista por timeout.
+app.listen(PORTA_API, '0.0.0.0', () => {
+    console.log(`🌐 [API]: Servidor Web ativo na porta: ${PORTA_API}`);
+    
+    // Somente depois que o Express está respondendo, ligamos o WhatsApp pesado
+    client.initialize();
+});
