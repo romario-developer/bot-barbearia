@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js",
-    "postinstall": "npx prisma generate && npx prisma db push"
+  "start": "node index.js",
+  "postinstall": "npx puppeteer browsers install chrome && npx prisma generate && npx prisma db push"
   },
   "keywords": [],
   "author": "",
