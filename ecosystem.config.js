@@ -1,45 +1,81 @@
-module.exports = {
-  apps: [
+const fs = require('fs');
+const path = require('path');
+
+// ==========================================
+// LOCALIZA O NGROK
+//
+// O caminho muda de máquina para máquina, então procuramos nos lugares mais
+// comuns. Se não encontrar, o túnel simplesmente não é iniciado e o bot roda
+// normalmente (só o painel externo fica indisponível).
+//
+// Para apontar manualmente, defina a variável NGROK_PATH antes de subir:
+//     $env:NGROK_PATH="C:\\caminho\\para\\ngrok.exe"
+// ==========================================
+const CAMINHOS_NGROK = [
+    process.env.NGROK_PATH,
+    path.join(__dirname, 'ngrok.exe'),
+    path.join(__dirname, '..', 'ngrok.exe'),
+    'C:\\ngrok\\ngrok.exe',
+    'C:\\Program Files\\ngrok\\ngrok.exe',
+    path.join(process.env.USERPROFILE || '', 'ngrok.exe'),
+    path.join(process.env.USERPROFILE || '', 'Downloads', 'ngrok.exe'),
+    path.join(process.env.LOCALAPPDATA || '', 'ngrok', 'ngrok.exe')
+].filter(Boolean);
+
+const ngrokEncontrado = CAMINHOS_NGROK.find(c => {
+    try { return fs.existsSync(c); } catch { return false; }
+});
+
+const DOMINIO_NGROK = process.env.NGROK_DOMINIO || 'overcensorious-bart-nonpacific.ngrok-free.dev';
+
+const apps = [
     {
-      name: "bot-barbearia",
-      script: "index.js",
+        name: 'bot-barbearia',
+        script: 'index.js',
+        cwd: __dirname,
 
-      // Reinicio automatico
-      autorestart: true,
-      watch: false,
+        autorestart: true,
+        watch: false,
 
-      // Se travar e passar de 600MB de RAM, reinicia sozinho
-      max_memory_restart: "600M",
+        // Se travar e passar de 600MB de RAM, reinicia sozinho
+        max_memory_restart: '600M',
 
-      // Evita loop infinito de restart quando ha erro de configuracao
-      min_uptime: "60s",
-      max_restarts: 15,
-      restart_delay: 5000,
-      exp_backoff_restart_delay: 200,
+        // Evita loop infinito de restart quando há erro de configuração
+        min_uptime: '60s',
+        max_restarts: 15,
+        restart_delay: 5000,
+        exp_backoff_restart_delay: 200,
 
-      // Logs com data/hora, uteis para descobrir por que caiu
-      time: true,
-      log_date_format: "DD/MM/YYYY HH:mm:ss",
-      error_file: "./logs/bot-erro.log",
-      out_file: "./logs/bot-saida.log",
-      merge_logs: true,
+        time: true,
+        log_date_format: 'DD/MM/YYYY HH:mm:ss',
+        error_file: path.join(__dirname, 'logs', 'bot-erro.log'),
+        out_file: path.join(__dirname, 'logs', 'bot-saida.log'),
+        merge_logs: true,
 
-      env: {
-        NODE_ENV: "production"
-      }
-    },
-    {
-      name: "ngrok-tunnel",
-      script: ".\\ngrok.exe",
-      args: "http 10000 --domain=overcensorious-bart-nonpacific.ngrok-free.dev",
-      interpreter: "none",
-      autorestart: true,
-      restart_delay: 10000,
-      min_uptime: "30s",
-      max_restarts: 20,
-      time: true,
-      error_file: "./logs/ngrok-erro.log",
-      out_file: "./logs/ngrok-saida.log"
+        env: { NODE_ENV: 'production' }
     }
-  ]
-};
+];
+
+if (ngrokEncontrado) {
+    apps.push({
+        name: 'ngrok-tunnel',
+        script: ngrokEncontrado,
+        args: `http 10000 --domain=${DOMINIO_NGROK}`,
+        interpreter: 'none',
+        cwd: __dirname,
+
+        autorestart: true,
+        restart_delay: 10000,
+        min_uptime: '30s',
+        max_restarts: 20,
+
+        time: true,
+        error_file: path.join(__dirname, 'logs', 'ngrok-erro.log'),
+        out_file: path.join(__dirname, 'logs', 'ngrok-saida.log')
+    });
+} else {
+    console.log('[ecosystem] ngrok.exe não encontrado — o túnel não será iniciado.');
+    console.log('[ecosystem] Para habilitar: $env:NGROK_PATH="caminho\\completo\\ngrok.exe"');
+}
+
+module.exports = { apps };

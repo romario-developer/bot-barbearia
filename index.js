@@ -3,6 +3,39 @@
 // Fluxo por enquetes clicáveis + fallback numérico
 // ==========================================
 
+// ==========================================
+// CARREGA O ARQUIVO .env
+//
+// Precisa vir antes de tudo. Quando o bot roda pelo PM2, ele não herda as
+// variáveis do terminal, então sem isso o DATABASE_URL chegaria vazio.
+// Variáveis já definidas no ambiente têm prioridade sobre o .env.
+// ==========================================
+(function carregarEnv() {
+    try {
+        const fs = require('fs');
+        const path = require('path');
+        const caminho = path.join(__dirname, '.env');
+        if (!fs.existsSync(caminho)) return;
+
+        for (const linha of fs.readFileSync(caminho, 'utf8').split('\n')) {
+            const limpa = linha.trim();
+            if (!limpa || limpa.startsWith('#')) continue;
+
+            const corte = limpa.indexOf('=');
+            if (corte === -1) continue;
+
+            const chave = limpa.slice(0, corte).trim();
+            let valor = limpa.slice(corte + 1).trim();
+
+            const aspas = (valor.startsWith('"') && valor.endsWith('"')) ||
+                          (valor.startsWith("'") && valor.endsWith("'"));
+            if (aspas) valor = valor.slice(1, -1);
+
+            if (process.env[chave] === undefined) process.env[chave] = valor;
+        }
+    } catch { /* sem .env, segue com as variáveis do ambiente */ }
+})();
+
 const { Client, LocalAuth, Poll } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { PrismaClient } = require('@prisma/client');
