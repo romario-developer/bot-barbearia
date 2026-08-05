@@ -40,24 +40,21 @@ const USAR_ENQUETES = process.env.USAR_ENQUETES === 'true';
 const numerosBloqueados = ['213610265579641@lid'];
 
 // ==========================================
-// MODO DE TESTE - LISTA DE NÚMEROS LIBERADOS
+// LISTA DE NÚMEROS LIBERADOS (MODO DE TESTE)
 //
-// Enquanto houver número nesta lista, o bot responde SOMENTE a eles.
-// Para liberar o bot para todos os clientes, deixe a lista vazia:
-//     const NUMEROS_PERMITIDOS = [];
+// Lista VAZIA = o bot atende todos os clientes. É assim que fica em produção.
 //
-// Pode escrever com ou sem o 55 na frente.
+// Para voltar a testar sem atender clientes de verdade, suba o bot assim:
+//     $env:NUMEROS_PERMITIDOS="73991472169,9848494243912"
+//     node index.js
 //
-// ATENÇÃO: o WhatsApp novo identifica alguns contatos por "LID" (um número
-// interno, terminado em @lid) em vez do telefone real. Se o log mostrar
-// "número fora da lista" com um @lid, copie esses dígitos e cole aqui também.
+// Pode escrever com ou sem o 55 na frente. O WhatsApp novo identifica alguns
+// contatos por "LID" (número interno, terminado em @lid) em vez do telefone;
+// se o log mostrar um @lid bloqueado, cole esses dígitos aqui também.
 // ==========================================
 const NUMEROS_PERMITIDOS = (process.env.NUMEROS_PERMITIDOS !== undefined
-    ? process.env.NUMEROS_PERMITIDOS.split(',')   // vazio ("") = libera para todos
-    : [
-        '73991472169',      // telefone
-        '9848494243912'     // LID do mesmo aparelho
-    ]
+    ? process.env.NUMEROS_PERMITIDOS.split(',')
+    : []   // produção: atende todo mundo
 ).map(n => String(n).replace(/\D/g, '')).filter(Boolean);
 
 function identificadoresDoContato(chatId, contato) {
