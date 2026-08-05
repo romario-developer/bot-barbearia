@@ -1,0 +1,30 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Servico {
+  id    Int    @id @default(autoincrement())
+  nome  String
+  preco String
+  duracao Int      @default(30)
+}
+
+model Horario {
+  id       Int     @id @default(autoincrement())
+  data     String  
+  hora     String
+  status   String  @default("disponivel")
+  cliente  String?
+  servico  String?
+  whatsapp String?
+}
+
+model Configuracao {
+  id       Int     @id @default(1)
+  botAtivo Boolean @default(true)
+}
