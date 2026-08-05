@@ -39,22 +39,35 @@ const numerosBloqueados = ['213610265579641@lid'];
 //     const NUMEROS_PERMITIDOS = [];
 //
 // Pode escrever com ou sem o 55 na frente.
+//
+// ATENÇÃO: o WhatsApp novo identifica alguns contatos por "LID" (um número
+// interno, terminado em @lid) em vez do telefone real. Se o log mostrar
+// "número fora da lista" com um @lid, copie esses dígitos e cole aqui também.
 // ==========================================
 const NUMEROS_PERMITIDOS = (process.env.NUMEROS_PERMITIDOS !== undefined
     ? process.env.NUMEROS_PERMITIDOS.split(',')   // vazio ("") = libera para todos
-    : ['73991472169']
+    : [
+        '73991472169',      // telefone
+        '9848494243912'     // LID do mesmo aparelho
+    ]
 ).map(n => String(n).replace(/\D/g, '')).filter(Boolean);
+
+function identificadoresDoContato(chatId, contato) {
+    return [
+        String(chatId || '').split('@')[0],
+        contato?.number,
+        contato?.id?.user,
+        contato?.id?._serialized?.split('@')[0]
+    ].map(v => String(v || '').replace(/\D/g, '')).filter(Boolean);
+}
 
 function numeroPermitido(chatId, contato) {
     if (NUMEROS_PERMITIDOS.length === 0) return true; // lista vazia = liberado para todos
 
-    const candidatos = [
-        String(chatId || '').split('@')[0].replace(/\D/g, ''),
-        String(contato?.number || '').replace(/\D/g, '')
-    ].filter(Boolean);
+    const candidatos = identificadoresDoContato(chatId, contato);
 
     return NUMEROS_PERMITIDOS.some(permitido =>
-        candidatos.some(c => c.endsWith(permitido) || permitido.endsWith(c))
+        candidatos.some(c => c === permitido || c.endsWith(permitido) || permitido.endsWith(c))
     );
 }
 
@@ -1212,7 +1225,8 @@ client.on('message', async (msg) => {
 
         // Modo de teste: responde apenas aos números liberados
         if (!numeroPermitido(chatId, contato)) {
-            log('Mensagem ignorada (número fora da lista de teste):', chatId);
+            log('Mensagem ignorada. Identificadores vistos:', identificadoresDoContato(chatId, contato).join(' | '),
+                '-> para liberar, adicione um deles em NUMEROS_PERMITIDOS.');
             return;
         }
 
