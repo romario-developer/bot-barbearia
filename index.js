@@ -372,7 +372,8 @@ async function enviarMenuServicos(chatId, nomeCliente) {
         label: `${s.nome} - R$ ${s.preco}`
     }));
     if (USAR_ENQUETES) opcoes.push({ id: 'servico_confirmar', label: '✅ Pronto, confirmar escolha' });
-    opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
+    opcoes.push({ id: 'cancelar_agendamento', label: '❌ Cancelar um agendamento que já fiz' });
+    opcoes.push({ id: 'cancelar', label: '🚪 Sair do atendimento' });
 
     estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
     dadosTemporarios[chatId] = { servicosEscolhidos: [] };
@@ -470,7 +471,11 @@ async function processarEscolha(chatId, escolhaId, contato) {
 
     if (escolhaId === 'cancelar') {
         encerrarAtendimento(chatId);
-        return client.sendMessage(chatId, '❌ Atendimento cancelado. Quando quiser, é só mandar um "Oi". Estamos à disposição!');
+        return client.sendMessage(chatId, '👋 Atendimento encerrado. Quando quiser, é só mandar um "Oi". Estamos à disposição!');
+    }
+
+    if (escolhaId === 'cancelar_agendamento') {
+        return cancelarAgendamentoDoCliente(chatId, contato);
     }
 
     // ---- DATA ----
@@ -1249,9 +1254,14 @@ client.on('message', async (msg) => {
 
         log('Mensagem de', chatId, '->', textoOriginal);
 
-        // Cancelar o agendamento já existente
-        if (texto === 'cancelar agendamento' || texto === 'desmarcar') {
-            return cancelarAgendamentoDoCliente(chatId, contato, msg);
+        // Cancelar o agendamento já existente (aceita várias formas de escrever)
+        const pedidoDeCancelamento = [
+            'cancelar agendamento', 'cancelar meu agendamento', 'cancelar o agendamento',
+            'desmarcar', 'desmarcar agendamento', 'desmarcar horario', 'desmarcar horário',
+            'cancelar horario', 'cancelar horário', 'cancelar meu horario', 'cancelar meu horário'
+        ];
+        if (pedidoDeCancelamento.includes(texto)) {
+            return cancelarAgendamentoDoCliente(chatId, contato);
         }
 
         // Sair do atendimento a qualquer momento
@@ -1292,6 +1302,7 @@ client.on('message', async (msg) => {
             const ids = resolverEscolhasMultiplas(chatId, texto)
                 .filter(id => id !== 'servico_confirmar');
 
+            if (ids.includes('cancelar_agendamento')) return processarEscolha(chatId, 'cancelar_agendamento', contato);
             if (ids.includes('cancelar')) return processarEscolha(chatId, 'cancelar', contato);
             if (ids.length > 0) return processarServicosSelecionados(chatId, ids, contato);
 
@@ -1318,23 +1329,33 @@ client.on('message', async (msg) => {
     }
 });
 
-async function cancelarAgendamentoDoCliente(chatId, contato, msg) {
-    const numeroReal = contato?.number || chatId.split('@')[0];
+async function cancelarAgendamentoDoCliente(chatId, contato) {
+    const responder = t => client.sendMessage(chatId, t);
+
+    // Procura por qualquer identificador conhecido do cliente (telefone ou LID)
+    const identificadores = identificadoresDoContato(chatId, contato);
+    const condicoes = [{ chatId: chatId }];
+    for (const ident of identificadores) condicoes.push({ whatsapp: ident });
 
     const reservas = await prisma.horario.findMany({
-        where: {
-            status: 'ocupado',
-            OR: [{ chatId: chatId }, { whatsapp: numeroReal }]
-        }
+        where: { status: 'ocupado', OR: condicoes }
     });
 
     // Só cancela agendamentos futuros
     const agora = new Date();
     const futuras = reservas.filter(r => stringParaData(r.data, r.hora) > agora);
 
+    log('Cancelamento pedido por', chatId,
+        '| identificadores:', identificadores.join(' | '),
+        '| reservas encontradas:', reservas.length,
+        '| futuras:', futuras.length);
+
     if (futuras.length === 0) {
         encerrarAtendimento(chatId);
-        return msg.reply('Não encontramos nenhum agendamento futuro no seu número.');
+        const aviso = reservas.length > 0
+            ? 'Você não tem agendamento futuro para cancelar — o horário que encontramos no seu número já passou.'
+            : 'Não encontramos nenhum agendamento ativo no seu número.';
+        return responder(`${aviso}\n\nSe quiser marcar um novo horário, envie um "Oi".`);
     }
 
     const grupos = [...new Set(futuras.map(r => r.grupoId).filter(Boolean))];
@@ -1351,10 +1372,15 @@ async function cancelarAgendamentoDoCliente(chatId, contato, msg) {
     });
 
     await avisarFila(primeira.data);
-    await notificarBarbeiro(`❌ *CANCELAMENTO*\n\nO cliente ${primeira.cliente || numeroReal} cancelou o horário de ${primeira.data} às ${primeira.hora}.`);
+    await notificarBarbeiro(`❌ *CANCELAMENTO*\n\nO cliente ${primeira.cliente || identificadores[0]} cancelou o horário de *${primeira.data}* às *${primeira.hora}* (${primeira.servico}).`);
 
+    log('Cancelado:', primeira.cliente, primeira.data, primeira.hora);
     encerrarAtendimento(chatId);
-    return msg.reply('✅ Agendamento cancelado e horário liberado. Se quiser remarcar, envie um "Oi".');
+    return responder(
+        `✅ *Agendamento cancelado!*\n\n` +
+        `📅 ${primeira.data} às ${primeira.hora}\n` +
+        `✂️ ${primeira.servico}\n\n` +
+        `O horário foi liberado. Se quiser remarcar, envie um "Oi".`);
 }
 
 // ==========================================
