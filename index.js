@@ -77,11 +77,36 @@ function numeroPermitido(chatId, contato) {
 }
 
 // ==========================================
+// AVISO DE CLIENTE COM DIFICULDADE
+//
+// O barbeiro é avisado quando o cliente trava no meio do agendamento,
+// para que ele possa entrar na conversa e ajudar manualmente.
+// ==========================================
+const MINUTOS_PARA_AVISO_AJUDA = 5;  // parou de responder no meio do fluxo
+const ERROS_PARA_AVISO_AJUDA = 3;    // digitou opção inválida 3 vezes seguidas
+
+const NOME_DOS_PASSOS = {
+    ESCOLHENDO_SERVICO: 'escolhendo o serviço',
+    ESCOLHENDO_DATA: 'escolhendo o dia',
+    DIGITANDO_DATA: 'digitando a data',
+    ESCOLHENDO_HORARIO: 'escolhendo o horário',
+    DIGITANDO_NOME: 'informando o nome',
+    DIGITANDO_NOME_TEXTO: 'informando o nome',
+    FILA_ESPERA: 'decidindo sobre a fila de espera'
+};
+
+// ==========================================
 // ESTADO EM MEMÓRIA
 // ==========================================
 const estadosUsuarios = {};
 const dadosTemporarios = {};
 const gerandoAgendaLock = {};
+
+// Acompanhamento para o aviso de ajuda
+const ultimaAtividade = {};
+const errosSeguidos = {};
+const avisoAjudaEnviado = {};
+const infoCliente = {};
 
 // Enquetes ativas: messageId da enquete -> { chatId, tipo, opcoes }
 const enquetesPorMensagem = {};
@@ -267,6 +292,9 @@ async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null, 
         await client.sendMessage(chatId, textoAntes).catch(() => {});
     }
 
+    // Chegou aqui = o cliente avançou um passo, então zera a contagem de erros
+    errosSeguidos[chatId] = 0;
+
     const registro = { chatId, tipo, opcoes: opcoesLimitadas, multipla, criadaEm: Date.now() };
 
     const enviarMenuNumerado = async () => {
@@ -352,7 +380,59 @@ function limparEnquetesDoChat(chatId) {
 function encerrarAtendimento(chatId) {
     delete estadosUsuarios[chatId];
     delete dadosTemporarios[chatId];
+    delete ultimaAtividade[chatId];
+    delete errosSeguidos[chatId];
+    delete avisoAjudaEnviado[chatId];
+    delete infoCliente[chatId];
     limparEnquetesDoChat(chatId);
+}
+
+// ==========================================
+// AVISO AO BARBEIRO: CLIENTE PRECISANDO DE AJUDA
+// ==========================================
+async function avisarBarbeiroSobreDificuldade(chatId, motivo) {
+    if (avisoAjudaEnviado[chatId]) return;
+    avisoAjudaEnviado[chatId] = true;
+
+    const info = infoCliente[chatId] || {};
+    const passo = NOME_DOS_PASSOS[estadosUsuarios[chatId]] || 'no meio do atendimento';
+    const numero = info.numero || String(chatId).split('@')[0];
+
+    let msg = `🆘 *CLIENTE PRECISANDO DE AJUDA*\n\n`;
+    msg += `👤 ${info.nome || 'Cliente'}\n`;
+    msg += `📱 ${numero}\n`;
+    msg += `📍 Parou ${passo}\n`;
+    msg += `⚠️ ${motivo}\n`;
+    if (info.ultimoTexto) msg += `💬 Última mensagem dele: "${info.ultimoTexto}"\n`;
+    msg += `\nSe puder, entre na conversa e ajude.`;
+
+    await notificarBarbeiro(msg);
+    log('Aviso de dificuldade enviado ao barbeiro:', chatId, '-', motivo);
+}
+
+// Roda junto com as demais rotinas, a cada minuto
+async function verificarClientesParados() {
+    if (!clienteConectado) return;
+
+    const agora = Date.now();
+    const limite = MINUTOS_PARA_AVISO_AJUDA * 60000;
+
+    for (const [chatId, quando] of Object.entries(ultimaAtividade)) {
+        const estado = estadosUsuarios[chatId];
+
+        // Só avisa quem está no meio de um agendamento
+        if (!estado || !NOME_DOS_PASSOS[estado]) continue;
+        if (avisoAjudaEnviado[chatId]) continue;
+        if (agora - quando < limite) continue;
+
+        const minutos = Math.round((agora - quando) / 60000);
+        await avisarBarbeiroSobreDificuldade(chatId, `Sem responder há ${minutos} minutos.`);
+    }
+
+    // Limpa sessões abandonadas há mais de 2 horas
+    for (const [chatId, quando] of Object.entries(ultimaAtividade)) {
+        if (agora - quando > 2 * 3600000) encerrarAtendimento(chatId);
+    }
 }
 
 // ==========================================
@@ -932,6 +1012,7 @@ function iniciarRotinas() {
             await verificarResumoDiario();
             await verificarLembretes();
             await verificarFeedbacks();
+            await verificarClientesParados();
 
             const hojeStr = dataParaString(new Date());
             if (ultimaLimpeza !== hojeStr && new Date().getHours() >= 1) {
@@ -1251,6 +1332,14 @@ client.on('message', async (msg) => {
 
         log('Mensagem de', chatId, '->', textoOriginal);
 
+        // Acompanhamento para o aviso de dificuldade
+        ultimaAtividade[chatId] = Date.now();
+        infoCliente[chatId] = {
+            nome: nomeCliente,
+            numero: contato?.number || String(chatId).split('@')[0],
+            ultimoTexto: textoOriginal.substring(0, 60)
+        };
+
         // Cancelar o agendamento já existente (aceita várias formas de escrever)
         const pedidoDeCancelamento = [
             'cancelar agendamento', 'cancelar meu agendamento', 'cancelar o agendamento',
@@ -1310,12 +1399,23 @@ client.on('message', async (msg) => {
         // Demais estados: tenta casar o texto com a enquete ativa
         if (estado) {
             const escolha = resolverEscolhaPorTexto(chatId, texto);
-            if (escolha) return processarEscolha(chatId, escolha, contato);
+            if (escolha) {
+                errosSeguidos[chatId] = 0;
+                return processarEscolha(chatId, escolha, contato);
+            }
 
             const registro = ultimaEnquetePorChat[chatId];
             if (registro) {
+                errosSeguidos[chatId] = (errosSeguidos[chatId] || 0) + 1;
+
+                if (errosSeguidos[chatId] >= ERROS_PARA_AVISO_AJUDA) {
+                    await avisarBarbeiroSobreDificuldade(chatId,
+                        `Digitou opção inválida ${errosSeguidos[chatId]} vezes seguidas.`);
+                    await msg.reply('Percebi que você está com dificuldade. Já avisei o barbeiro, ele deve te chamar aqui em instantes. 🙂');
+                }
+
                 const menu = registro.opcoes.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
-                return msg.reply(`Não entendi 🤔\n\nToque em uma das opções da enquete acima, ou digite o número:\n\n${menu}`);
+                return msg.reply(`Não entendi 🤔\n\nDigite apenas o *número* da opção desejada:\n\n${menu}`);
             }
         }
 
