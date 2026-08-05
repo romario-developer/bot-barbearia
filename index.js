@@ -32,6 +32,33 @@ const MAX_TAMANHO_OPCAO = 90;  // limite seguro por opção de enquete
 const numerosBloqueados = ['213610265579641@lid'];
 
 // ==========================================
+// MODO DE TESTE - LISTA DE NÚMEROS LIBERADOS
+//
+// Enquanto houver número nesta lista, o bot responde SOMENTE a eles.
+// Para liberar o bot para todos os clientes, deixe a lista vazia:
+//     const NUMEROS_PERMITIDOS = [];
+//
+// Pode escrever com ou sem o 55 na frente.
+// ==========================================
+const NUMEROS_PERMITIDOS = (process.env.NUMEROS_PERMITIDOS !== undefined
+    ? process.env.NUMEROS_PERMITIDOS.split(',')   // vazio ("") = libera para todos
+    : ['73991472169']
+).map(n => String(n).replace(/\D/g, '')).filter(Boolean);
+
+function numeroPermitido(chatId, contato) {
+    if (NUMEROS_PERMITIDOS.length === 0) return true; // lista vazia = liberado para todos
+
+    const candidatos = [
+        String(chatId || '').split('@')[0].replace(/\D/g, ''),
+        String(contato?.number || '').replace(/\D/g, '')
+    ].filter(Boolean);
+
+    return NUMEROS_PERMITIDOS.some(permitido =>
+        candidatos.some(c => c.endsWith(permitido) || permitido.endsWith(c))
+    );
+}
+
+// ==========================================
 // ESTADO EM MEMÓRIA
 // ==========================================
 const estadosUsuarios = {};
@@ -212,7 +239,7 @@ async function botEstaAtivo() {
 // ==========================================
 // ENVIO DE ENQUETES (OPÇÕES CLICÁVEIS)
 // ==========================================
-async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null) {
+async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null, multipla = false) {
     // opcoes: [{ id, label }]
     const opcoesLimitadas = opcoes
         .slice(0, MAX_OPCOES_ENQUETE + 1)
@@ -222,10 +249,10 @@ async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null) 
         await client.sendMessage(chatId, textoAntes).catch(() => {});
     }
 
-    const registro = { chatId, tipo, opcoes: opcoesLimitadas, criadaEm: Date.now() };
+    const registro = { chatId, tipo, opcoes: opcoesLimitadas, multipla, criadaEm: Date.now() };
 
     try {
-        const poll = new Poll(pergunta, opcoesLimitadas.map(o => o.label), { allowMultipleAnswers: false });
+        const poll = new Poll(pergunta, opcoesLimitadas.map(o => o.label), { allowMultipleAnswers: multipla });
         const enviada = await client.sendMessage(chatId, poll);
         const messageId = enviada?.id?._serialized;
         if (messageId) {
@@ -239,9 +266,28 @@ async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null) 
         log('Falha ao enviar enquete, usando menu numerado:', err.message);
         ultimaEnquetePorChat[chatId] = registro;
         const menu = opcoesLimitadas.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
-        await client.sendMessage(chatId, `${pergunta}\n\n${menu}\n\n👉 Digite o número da opção desejada.`).catch(() => {});
+        const instrucao = multipla
+            ? '👉 Digite os números que deseja, separados por vírgula. Ex: 1,3'
+            : '👉 Digite o número da opção desejada.';
+        await client.sendMessage(chatId, `${pergunta}\n\n${menu}\n\n${instrucao}`).catch(() => {});
         return false;
     }
+}
+
+// Converte texto digitado em VÁRIOS ids (ex.: "1,3" ou "1 3")
+function resolverEscolhasMultiplas(chatId, texto) {
+    const registro = ultimaEnquetePorChat[chatId];
+    if (!registro) return [];
+
+    const numeros = String(texto).match(/\d{1,2}/g);
+    if (!numeros) return [];
+
+    const ids = [];
+    for (const n of numeros) {
+        const opcao = registro.opcoes[parseInt(n) - 1];
+        if (opcao && !ids.includes(opcao.id)) ids.push(opcao.id);
+    }
+    return ids;
 }
 
 // Converte texto digitado em um id de opção da última enquete do chat
@@ -291,35 +337,22 @@ async function enviarMenuServicos(chatId, nomeCliente) {
         return client.sendMessage(chatId, '⚠️ Estamos atualizando nossa lista de serviços. Tente novamente em alguns instantes.');
     }
 
-    const opcoes = servicos.slice(0, MAX_OPCOES_ENQUETE).map(s => ({
+    const opcoes = servicos.slice(0, MAX_OPCOES_ENQUETE - 1).map(s => ({
         id: `servico_${s.id}`,
         label: `${s.nome} - R$ ${s.preco}`
     }));
+    opcoes.push({ id: 'servico_confirmar', label: '✅ Pronto, confirmar escolha' });
     opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
 
     estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
     dadosTemporarios[chatId] = { servicosEscolhidos: [] };
 
-    const saudacao = `👋 Olá, ${nomeCliente}! Bem-vindo(a) à *${NOME_BARBEARIA}*.\n\nÉ só tocar no serviço desejado logo abaixo.`;
-    await enviarEnquete(chatId, '✂️ Qual serviço você deseja?', opcoes, 'SERVICO', saudacao);
-}
+    const saudacao =
+        `👋 Olá, ${nomeCliente}! Bem-vindo(a) à *${NOME_BARBEARIA}*.\n\n` +
+        `Marque *todos* os serviços que deseja (pode escolher mais de um: cabelo, barba, pezinho...) ` +
+        `e depois toque em *"Pronto, confirmar escolha"*.`;
 
-async function enviarMenuAdicionarMais(chatId) {
-    const dados = dadosTemporarios[chatId];
-    if (!dados?.servicosEscolhidos?.length) return enviarMenuServicos(chatId, 'Cliente');
-
-    const nomes = dados.servicosEscolhidos.map(s => s.nome).join(' + ');
-    const tempo = dados.servicosEscolhidos.reduce((acc, s) => acc + (s.duracao || 30), 0);
-
-    estadosUsuarios[chatId] = 'ADICIONAR_MAIS';
-    const opcoes = [
-        { id: 'add_nao', label: 'Não, quero escolher a data' },
-        { id: 'add_sim', label: 'Sim, adicionar outro serviço' },
-        { id: 'cancelar', label: 'Cancelar atendimento' }
-    ];
-
-    const texto = `✅ Selecionado: *${nomes}* (aprox. ${tempo} min).`;
-    await enviarEnquete(chatId, 'Deseja adicionar outro serviço?', opcoes, 'ADICIONAR_MAIS', texto);
+    await enviarEnquete(chatId, '✂️ Quais serviços você deseja?', opcoes, 'SERVICO', saudacao, true);
 }
 
 async function enviarMenuDatas(chatId) {
@@ -410,43 +443,6 @@ async function processarEscolha(chatId, escolhaId, contato) {
         return client.sendMessage(chatId, '❌ Atendimento cancelado. Quando quiser, é só mandar um "Oi". Estamos à disposição!');
     }
 
-    // ---- SERVIÇO ----
-    if (estado === 'ESCOLHENDO_SERVICO' && escolhaId.startsWith('servico_')) {
-        const servicoId = parseInt(escolhaId.replace('servico_', ''));
-        const servico = await prisma.servico.findUnique({ where: { id: servicoId } });
-        if (!servico) return client.sendMessage(chatId, 'Serviço não encontrado. Envie "Oi" para recomeçar.');
-
-        if (!dadosTemporarios[chatId]) dadosTemporarios[chatId] = { servicosEscolhidos: [] };
-        dadosTemporarios[chatId].servicosEscolhidos.push(servico);
-
-        return enviarMenuAdicionarMais(chatId);
-    }
-
-    // ---- ADICIONAR MAIS SERVIÇOS ----
-    if (estado === 'ADICIONAR_MAIS') {
-        if (escolhaId === 'add_sim') {
-            const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
-            const jaEscolhidos = dadosTemporarios[chatId].servicosEscolhidos.map(s => s.id);
-            const restantes = servicos.filter(s => !jaEscolhidos.includes(s.id));
-
-            if (restantes.length === 0) {
-                await client.sendMessage(chatId, 'Você já selecionou todos os serviços disponíveis.');
-                return finalizarSelecaoServicos(chatId);
-            }
-
-            const opcoes = restantes.slice(0, MAX_OPCOES_ENQUETE).map(s => ({
-                id: `servico_${s.id}`,
-                label: `${s.nome} - R$ ${s.preco}`
-            }));
-            opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
-
-            estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
-            return enviarEnquete(chatId, '✂️ Qual serviço você quer adicionar?', opcoes, 'SERVICO');
-        }
-
-        if (escolhaId === 'add_nao') return finalizarSelecaoServicos(chatId);
-    }
-
     // ---- DATA ----
     if (estado === 'ESCOLHENDO_DATA' && escolhaId.startsWith('data_')) {
         if (escolhaId === 'data_outra') {
@@ -529,6 +525,41 @@ async function processarEscolha(chatId, escolhaId, contato) {
     }
 
     return null;
+}
+
+// Recebe TODOS os serviços marcados na enquete de uma vez
+async function processarServicosSelecionados(chatId, idsEscolhidos, contato) {
+    const ids = idsEscolhidos
+        .filter(id => id.startsWith('servico_') && id !== 'servico_confirmar')
+        .map(id => parseInt(id.replace('servico_', '')))
+        .filter(n => !isNaN(n));
+
+    if (ids.length === 0) {
+        return client.sendMessage(chatId,
+            '⚠️ Você ainda não marcou nenhum serviço.\n\nMarque os serviços desejados na enquete acima e depois toque em *"Pronto, confirmar escolha"*.');
+    }
+
+    const servicos = await prisma.servico.findMany({ where: { id: { in: ids } }, orderBy: { id: 'asc' } });
+    if (servicos.length === 0) {
+        return client.sendMessage(chatId, 'Não encontramos esses serviços. Envie "Oi" para recomeçar.');
+    }
+
+    if (!dadosTemporarios[chatId]) dadosTemporarios[chatId] = {};
+    dadosTemporarios[chatId].servicosEscolhidos = servicos;
+
+    const nomes = servicos.map(s => s.nome).join(' + ');
+    const tempo = servicos.reduce((acc, s) => acc + (s.duracao || 30), 0);
+    const total = servicos.reduce((acc, s) => {
+        const valor = parseFloat(String(s.preco).replace(/[^\d,.-]/g, '').replace(',', '.'));
+        return acc + (isNaN(valor) ? 0 : valor);
+    }, 0);
+
+    await client.sendMessage(chatId,
+        `✅ *Serviços selecionados:*\n${servicos.map(s => `• ${s.nome} - R$ ${s.preco}`).join('\n')}\n\n` +
+        `💰 *Total:* R$ ${total.toFixed(2).replace('.', ',')}\n` +
+        `⏳ *Duração:* aprox. ${tempo} min`);
+
+    return finalizarSelecaoServicos(chatId);
 }
 
 function finalizarSelecaoServicos(chatId) {
@@ -1114,23 +1145,38 @@ client.on('vote_update', async (vote) => {
         const chatId = registro?.chatId || vote?.parentMessage?.to;
         if (!chatId) return;
 
-        const labelEscolhido = selecionadas[0].name;
-        const chaveVoto = `${messageId}_${vote.voter}_${labelEscolhido}`;
+        const labels = selecionadas.map(s => s.name);
+        const chaveVoto = `${messageId}_${vote.voter}_${[...labels].sort().join('|')}`;
         if (votosProcessados.has(chaveVoto)) return;
         votosProcessados.add(chaveVoto);
 
         if (!(await botEstaAtivo())) return;
 
-        const opcoes = registro?.opcoes || ultimaEnquetePorChat[chatId]?.opcoes || [];
-        const opcao = opcoes.find(o => o.label === labelEscolhido);
-        if (!opcao) return;
-
-        log('Voto recebido de', chatId, '->', labelEscolhido);
+        const registroAtivo = registro || ultimaEnquetePorChat[chatId];
+        const opcoes = registroAtivo?.opcoes || [];
+        const escolhidas = labels.map(l => opcoes.find(o => o.label === l)).filter(Boolean);
+        if (escolhidas.length === 0) return;
 
         let contato = null;
         try { contato = await client.getContactById(chatId); } catch { /* segue sem contato */ }
 
-        await processarEscolha(chatId, opcao.id, contato);
+        if (!numeroPermitido(chatId, contato)) {
+            log('Voto ignorado (número fora da lista de teste):', chatId);
+            return;
+        }
+
+        log('Voto recebido de', chatId, '->', labels.join(', '));
+
+        // Enquete de múltipla escolha: só age quando o cliente toca em "Pronto, confirmar"
+        if (registroAtivo?.multipla) {
+            if (escolhidas.some(o => o.id === 'cancelar')) {
+                return processarEscolha(chatId, 'cancelar', contato);
+            }
+            if (!escolhidas.some(o => o.id === 'servico_confirmar')) return; // ainda escolhendo
+            return processarServicosSelecionados(chatId, escolhidas.map(o => o.id), contato);
+        }
+
+        await processarEscolha(chatId, escolhidas[0].id, contato);
     } catch (err) {
         log('Erro ao processar voto:', err.message);
     }
@@ -1163,6 +1209,12 @@ client.on('message', async (msg) => {
 
         const contato = await msg.getContact().catch(() => null);
         const nomeCliente = contato?.pushname || 'Cliente';
+
+        // Modo de teste: responde apenas aos números liberados
+        if (!numeroPermitido(chatId, contato)) {
+            log('Mensagem ignorada (número fora da lista de teste):', chatId);
+            return;
+        }
 
         log('Mensagem de', chatId, '->', textoOriginal);
 
@@ -1202,6 +1254,18 @@ client.on('message', async (msg) => {
             const nome = textoOriginal.split(/\s+/)[0].substring(0, 40);
             if (nome.length < 2) return msg.reply('Nome muito curto. Digite seu primeiro nome, por favor.');
             return confirmarAgendamento(chatId, nome, contato);
+        }
+
+        // Escolha de serviços: aceita vários números de uma vez ("1,3" ou "1 3")
+        if (estado === 'ESCOLHENDO_SERVICO') {
+            const ids = resolverEscolhasMultiplas(chatId, texto)
+                .filter(id => id !== 'servico_confirmar');
+
+            if (ids.includes('cancelar')) return processarEscolha(chatId, 'cancelar', contato);
+            if (ids.length > 0) return processarServicosSelecionados(chatId, ids, contato);
+
+            const escolhaUnica = resolverEscolhaPorTexto(chatId, texto);
+            if (escolhaUnica === 'cancelar') return processarEscolha(chatId, 'cancelar', contato);
         }
 
         // Demais estados: tenta casar o texto com a enquete ativa
