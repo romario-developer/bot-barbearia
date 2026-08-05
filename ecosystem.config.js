@@ -26,7 +26,10 @@ const ngrokEncontrado = CAMINHOS_NGROK.find(c => {
     try { return fs.existsSync(c); } catch { return false; }
 });
 
-const DOMINIO_NGROK = process.env.NGROK_DOMINIO || 'overcensorious-bart-nonpacific.ngrok-free.dev';
+// A flag --domain foi descontinuada pelo ngrok; agora usa-se --url com a URL completa
+const DOMINIO_NGROK = (process.env.NGROK_DOMINIO || 'overcensorious-bart-nonpacific.ngrok-free.dev')
+    .replace(/^https?:\/\//, '');
+const URL_NGROK = `https://${DOMINIO_NGROK}`;
 
 const apps = [
     {
@@ -60,14 +63,16 @@ if (ngrokEncontrado) {
     apps.push({
         name: 'ngrok-tunnel',
         script: ngrokEncontrado,
-        args: `http 10000 --domain=${DOMINIO_NGROK}`,
+        args: `http 10000 --url=${URL_NGROK}`,
         interpreter: 'none',
         cwd: __dirname,
 
         autorestart: true,
-        restart_delay: 10000,
+        // Espera maior: se outro túnel ainda estiver liberando o domínio,
+        // reiniciar rápido demais só gera erro em loop (ERR_NGROK_334)
+        restart_delay: 20000,
         min_uptime: '30s',
-        max_restarts: 20,
+        max_restarts: 10,
 
         time: true,
         error_file: path.join(__dirname, 'logs', 'ngrok-erro.log'),
