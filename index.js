@@ -29,6 +29,14 @@ const HORARIOS_ALMOCO = ['11:45', '12:00', '12:15', '12:30', '12:45', '13:00', '
 const MAX_OPCOES_ENQUETE = 11; // WhatsApp aceita até 12; deixamos 1 de folga
 const MAX_TAMANHO_OPCAO = 90;  // limite seguro por opção de enquete
 
+// ==========================================
+// FORMATO DO MENU
+//
+// false = menu numerado, o cliente digita o número (padrão)
+// true  = enquete clicável do WhatsApp
+// ==========================================
+const USAR_ENQUETES = process.env.USAR_ENQUETES === 'true';
+
 const numerosBloqueados = ['213610265579641@lid'];
 
 // ==========================================
@@ -264,6 +272,20 @@ async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null, 
 
     const registro = { chatId, tipo, opcoes: opcoesLimitadas, multipla, criadaEm: Date.now() };
 
+    const enviarMenuNumerado = async () => {
+        ultimaEnquetePorChat[chatId] = registro;
+        const menu = opcoesLimitadas.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
+        const instrucao = multipla
+            ? '👉 Digite os números desejados separados por vírgula.\n_Ex: 1,3 para escolher dois serviços._'
+            : '👉 Digite o número da opção desejada.';
+        await client.sendMessage(chatId, `${pergunta}\n\n${menu}\n\n${instrucao}`).catch(() => {});
+    };
+
+    if (!USAR_ENQUETES) {
+        await enviarMenuNumerado();
+        return false;
+    }
+
     try {
         const poll = new Poll(pergunta, opcoesLimitadas.map(o => o.label), { allowMultipleAnswers: multipla });
         const enviada = await client.sendMessage(chatId, poll);
@@ -277,12 +299,7 @@ async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null, 
     } catch (err) {
         // Se a enquete falhar, cai automaticamente para o menu numerado
         log('Falha ao enviar enquete, usando menu numerado:', err.message);
-        ultimaEnquetePorChat[chatId] = registro;
-        const menu = opcoesLimitadas.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
-        const instrucao = multipla
-            ? '👉 Digite os números que deseja, separados por vírgula. Ex: 1,3'
-            : '👉 Digite o número da opção desejada.';
-        await client.sendMessage(chatId, `${pergunta}\n\n${menu}\n\n${instrucao}`).catch(() => {});
+        await enviarMenuNumerado();
         return false;
     }
 }
@@ -354,7 +371,7 @@ async function enviarMenuServicos(chatId, nomeCliente) {
         id: `servico_${s.id}`,
         label: `${s.nome} - R$ ${s.preco}`
     }));
-    opcoes.push({ id: 'servico_confirmar', label: '✅ Pronto, confirmar escolha' });
+    if (USAR_ENQUETES) opcoes.push({ id: 'servico_confirmar', label: '✅ Pronto, confirmar escolha' });
     opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
 
     estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
@@ -362,10 +379,10 @@ async function enviarMenuServicos(chatId, nomeCliente) {
 
     const saudacao =
         `👋 Olá, ${nomeCliente}! Bem-vindo(a) à *${NOME_BARBEARIA}*.\n\n` +
-        `Marque *todos* os serviços que deseja (pode escolher mais de um: cabelo, barba, pezinho...) ` +
-        `e depois toque em *"Pronto, confirmar escolha"*.`;
+        `É um prazer ter você aqui. Você pode escolher *mais de um serviço* ` +
+        `(cabelo, barba, pezinho...) na mesma visita.`;
 
-    await enviarEnquete(chatId, '✂️ Quais serviços você deseja?', opcoes, 'SERVICO', saudacao, true);
+    await enviarEnquete(chatId, '✂️ *Quais serviços você deseja?*', opcoes, 'SERVICO', saudacao, true);
 }
 
 async function enviarMenuDatas(chatId) {
