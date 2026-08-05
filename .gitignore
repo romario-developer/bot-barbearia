@@ -9,3 +9,12 @@ prisma/dev.db
 ngrok.exe
 logs/
 *.log
+
+# Backups e arquivos compactados nunca devem ir para o repositorio:
+# costumam conter o .env e a sessao do WhatsApp dentro
+*.rar
+*.zip
+*.7z
+*.bak
+.env.*
+!.env.exemplo
