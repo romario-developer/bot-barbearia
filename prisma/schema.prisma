@@ -8,20 +8,55 @@ generator client {
 }
 
 model Servico {
-  id    Int    @id @default(autoincrement())
-  nome  String
-  preco String
-  duracao Int      @default(30)
+  id      Int    @id @default(autoincrement())
+  nome    String
+  preco   String
+  duracao Int    @default(30)
 }
 
 model Horario {
   id       Int     @id @default(autoincrement())
-  data     String  
+  data     String
   hora     String
   status   String  @default("disponivel")
   cliente  String?
   servico  String?
   whatsapp String?
+
+  // Identificador do chat usado no agendamento (evita erro com numeros @lid)
+  chatId String?
+
+  // Agrupa os blocos de 15 min que pertencem ao mesmo agendamento
+  grupoId String?
+
+  // Controle das rotinas automaticas (persistido para sobreviver a restarts)
+  lembreteEnviado Boolean @default(false)
+  feedbackEnviado Boolean @default(false)
+
+  @@unique([data, hora])
+  @@index([data])
+  @@index([grupoId])
+  @@index([data, status])
+}
+
+model Avaliacao {
+  id       Int      @id @default(autoincrement())
+  cliente  String?
+  whatsapp String?
+  servico  String?
+  nota     Int
+  criadoEm DateTime @default(now())
+}
+
+model FilaEspera {
+  id       Int      @id @default(autoincrement())
+  data     String
+  chatId   String
+  cliente  String?
+  criadoEm DateTime @default(now())
+
+  @@unique([data, chatId])
+  @@index([data])
 }
 
 model Configuracao {

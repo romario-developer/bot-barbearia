@@ -1,23 +1,14 @@
 // ==========================================
-// 🚨 TRATAMENTO DE ERROS GLOBAIS
+// JONATHAN'S BARBER SHOP - BOT DE AGENDAMENTO
+// Fluxo por enquetes clicáveis + fallback numérico
 // ==========================================
-process.on('uncaughtException', (err) => {
-    console.error('CRASH FATAL (uncaughtException):', err);
-});
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('REJEIÇÃO NÃO TRATADA:', reason);
-});
-
-// ==========================================
-// 📦 IMPORTAÇÕES E CONFIGURAÇÕES INICIAIS
-// ==========================================
-// Foi adicionado o 'List' aqui para o menu interativo
-const { Client, LocalAuth, List } = require('whatsapp-web.js');
+const { Client, LocalAuth, Poll } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { PrismaClient } = require('@prisma/client');
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 
 const prisma = new PrismaClient();
 const app = express();
@@ -27,305 +18,952 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 🧠 ESTADOS E VARIÁVEIS GLOBAIS
+// CONFIGURAÇÕES
+// ==========================================
+const NUMERO_DO_BARBEIRO = process.env.NUMERO_BARBEIRO || '5573982105264';
+const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+const NOME_BARBEARIA = "Jonathan's Barber Shop";
+const BLOCO_MINUTOS = 15;
+const HORARIOS_ALMOCO = ['11:45', '12:00', '12:15', '12:30', '12:45', '13:00', '13:15'];
+const MAX_OPCOES_ENQUETE = 11; // WhatsApp aceita até 12; deixamos 1 de folga
+const MAX_TAMANHO_OPCAO = 90;  // limite seguro por opção de enquete
+
+const numerosBloqueados = ['213610265579641@lid'];
+
+// ==========================================
+// ESTADO EM MEMÓRIA
 // ==========================================
 const estadosUsuarios = {};
 const dadosTemporarios = {};
-const gerandoAgendaLock = {}; 
-const lembretesEnviados = new Set();
-const feedbacksEnviados = new Set(); 
-const filaDeEspera = {}; 
+const gerandoAgendaLock = {};
 
-const numerosBloqueados = ['213610265579641@lid'];
-const NUMERO_DO_BARBEIRO = '5573982105264'; 
+// Enquetes ativas: messageId da enquete -> { chatId, tipo, opcoes }
+const enquetesPorMensagem = {};
+// Última enquete enviada por chat (usada no fallback numérico)
+const ultimaEnquetePorChat = {};
+// Evita processar o mesmo voto duas vezes (o WhatsApp reenvia eventos)
+const votosProcessados = new Set();
+
+let clienteConectado = false;
+let reconectando = false;
 
 // ==========================================
-// 🛠️ SERVIÇOS E LÓGICA DE NEGÓCIO
+// UTILITÁRIOS
 // ==========================================
-function avisarFila(dataVaga) {
-    if (filaDeEspera[dataVaga] && filaDeEspera[dataVaga].length > 0) {
-        const msgFila = `🚨 *VAGA LIBERADA!*\n\nSurgiu um horário disponível para o dia *${dataVaga}*!\n\nComo você está em nossa fila de espera, caso ainda tenha interesse, por favor, envie um *"Oi"* aqui o quanto antes para garantir essa vaga.`;
-        
-        filaDeEspera[dataVaga].forEach(numero => {
-            client.sendMessage(numero + '@c.us', msgFila).catch(() => {});
-        });
-    }
+function log(...args) {
+    console.log(`[${new Date().toLocaleString('pt-BR')}]`, ...args);
+}
+
+function dataParaString(dateObj) {
+    const d = String(dateObj.getDate()).padStart(2, '0');
+    const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+    return `${d}/${m}/${dateObj.getFullYear()}`;
+}
+
+function stringParaData(dataStr, horaStr = '00:00') {
+    const [d, m, y] = String(dataStr).split('/').map(Number);
+    const [hh, mm] = String(horaStr).split(':').map(Number);
+    return new Date(y, m - 1, d, hh || 0, mm || 0, 0, 0);
+}
+
+function dataValida(dataStr) {
+    if (!/^\d{2}\/\d{2}\/\d{4}$/.test(String(dataStr || ''))) return false;
+    const dt = stringParaData(dataStr);
+    return !isNaN(dt.getTime());
 }
 
 function validarDataInput(texto) {
-    const limpo = texto.replace(/\D/g, ''); 
+    const limpo = String(texto).replace(/\D/g, '');
     let d, m, y;
-    const hoje = new Date();
-    const anoAtual = hoje.getFullYear();
+    const anoAtual = new Date().getFullYear();
 
-    if (limpo.length === 4) { 
-        d = limpo.substring(0, 2); m = limpo.substring(2, 4); y = anoAtual.toString();
-    } else if (limpo.length === 6) { 
+    if (limpo.length === 4) {
+        d = limpo.substring(0, 2); m = limpo.substring(2, 4); y = String(anoAtual);
+    } else if (limpo.length === 6) {
         d = limpo.substring(0, 2); m = limpo.substring(2, 4); y = '20' + limpo.substring(4, 6);
-    } else if (limpo.length === 8) { 
+    } else if (limpo.length === 8) {
         d = limpo.substring(0, 2); m = limpo.substring(2, 4); y = limpo.substring(4, 8);
     } else {
-        return null; 
+        return null;
     }
 
-    const dia = parseInt(d); const mes = parseInt(m); const ano = parseInt(y);
+    const dia = parseInt(d), mes = parseInt(m), ano = parseInt(y);
     if (dia < 1 || dia > 31 || mes < 1 || mes > 12) return null;
 
     const dataInput = new Date(ano, mes - 1, dia);
-    const hojeZerado = new Date(); hojeZerado.setHours(0, 0, 0, 0);
+    if (dataInput.getDate() !== dia || dataInput.getMonth() !== mes - 1) return null;
 
+    const hojeZerado = new Date();
+    hojeZerado.setHours(0, 0, 0, 0);
     if (dataInput < hojeZerado) return { erro: 'PASSADO' };
 
-    return { 
-        string: `${d.padStart(2, '0')}/${m.padStart(2, '0')}/${ano}`, 
-        diaSemana: dataInput.getDay() 
+    return {
+        string: `${d.padStart(2, '0')}/${m.padStart(2, '0')}/${ano}`,
+        diaSemana: dataInput.getDay()
     };
 }
 
+function horaFimDoDia(diaSemana) {
+    if (diaSemana === 0) return null;      // domingo fechado
+    if (diaSemana === 6) return '18:00';   // sábado
+    return '19:00';
+}
+
 function gerarHorarios(horaInicio, horaFim, intervaloMinutos) {
-    let slots = [];
-    let [inicioH, inicioM] = horaInicio.split(':').map(Number);
-    let [fimH, fimM] = horaFim.split(':').map(Number);
+    const slots = [];
+    const [inicioH, inicioM] = horaInicio.split(':').map(Number);
+    const [fimH, fimM] = horaFim.split(':').map(Number);
 
-    let tempoAtual = new Date(2000, 0, 1, inicioH, inicioM);
-    let tempoFinal = new Date(2000, 0, 1, fimH, fimM);
-
+    const tempoAtual = new Date(2000, 0, 1, inicioH, inicioM);
+    const tempoFinal = new Date(2000, 0, 1, fimH, fimM);
     if (tempoFinal <= tempoAtual) tempoFinal.setDate(tempoFinal.getDate() + 1);
 
-    // Revertido para bloquear apenas até as 13:15. As 13:30 estará livre!
-    const horariosAlmoco = ["11:45", "12:00", "12:15", "12:30", "12:45", "13:00", "13:15"];
-
     while (tempoAtual < tempoFinal) {
-        let h = tempoAtual.getHours().toString().padStart(2, '0');
-        let m = tempoAtual.getMinutes().toString().padStart(2, '0');
-        let horaAtual = `${h}:${m}`;
-        
-        let isAlmoco = horariosAlmoco.includes(horaAtual);
+        const h = String(tempoAtual.getHours()).padStart(2, '0');
+        const m = String(tempoAtual.getMinutes()).padStart(2, '0');
+        const hora = `${h}:${m}`;
+        const isAlmoco = HORARIOS_ALMOCO.includes(hora);
 
-        slots.push({ 
-            hora: horaAtual, 
-            status: isAlmoco ? "ocupado" : "disponivel", 
-            cliente: isAlmoco ? "ALMOÇO" : null, 
-            servico: isAlmoco ? "Pausa" : null, 
-            whatsapp: null 
+        slots.push({
+            hora,
+            status: isAlmoco ? 'ocupado' : 'disponivel',
+            cliente: isAlmoco ? 'ALMOÇO' : null,
+            servico: isAlmoco ? 'Pausa' : null,
+            whatsapp: null
         });
-        
+
         tempoAtual.setMinutes(tempoAtual.getMinutes() + intervaloMinutos);
     }
     return slots;
 }
 
-async function gerarAgendaDoDiaAtual() {
-    const dataHoje = new Date().toLocaleDateString('pt-BR');
-    const qtdHorarios = await prisma.horario.count({ where: { data: dataHoje } });
-    if (qtdHorarios > 0) return; 
+// Cria a agenda de uma data, se ainda não existir. Retorna os horários da data.
+async function garantirAgendaDaData(dataString) {
+    if (!dataValida(dataString)) return [];
 
-    const hoje = new Date().getDay(); 
-    let horaInicio = (hoje >= 1 && hoje <= 6) ? '09:00' : null;
-    let horaFim = (hoje >= 1 && hoje <= 5) ? '19:00' : (hoje === 6 ? '18:00' : null);
+    const existentes = await prisma.horario.findMany({
+        where: { data: dataString },
+        orderBy: { hora: 'asc' }
+    });
+    if (existentes.length > 0) return existentes;
 
-    if (horaInicio) {
-        if (!gerandoAgendaLock[dataHoje]) {
-            gerandoAgendaLock[dataHoje] = true;
-            try {
-                const slotsPadrao = gerarHorarios(horaInicio, horaFim, 15); 
-                for (const slot of slotsPadrao) {
-                    await prisma.horario.create({ data: { ...slot, data: dataHoje } });
-                }
-            } finally {
-                delete gerandoAgendaLock[dataHoje];
+    const hFim = horaFimDoDia(stringParaData(dataString).getDay());
+    if (!hFim) return [];
+
+    if (gerandoAgendaLock[dataString]) {
+        await new Promise(r => setTimeout(r, 1200));
+        return prisma.horario.findMany({ where: { data: dataString }, orderBy: { hora: 'asc' } });
+    }
+
+    gerandoAgendaLock[dataString] = true;
+    try {
+        const novosSlots = gerarHorarios('09:00', hFim, BLOCO_MINUTOS);
+        await prisma.horario.createMany({
+            data: novosSlots.map(s => ({ ...s, data: dataString })),
+            skipDuplicates: true
+        });
+    } catch (err) {
+        log('Erro ao gerar agenda de', dataString, '->', err.message);
+    } finally {
+        delete gerandoAgendaLock[dataString];
+    }
+
+    return prisma.horario.findMany({ where: { data: dataString }, orderBy: { hora: 'asc' } });
+}
+
+// Retorna os horários de início possíveis para um serviço que ocupa N blocos
+function calcularHorariosValidos(todosHorarios, blocosNecessarios, dataString) {
+    const ordenados = [...todosHorarios].sort((a, b) => a.hora.localeCompare(b.hora));
+    const validos = [];
+
+    for (let i = 0; i <= ordenados.length - blocosNecessarios; i++) {
+        let sequenciaOk = true;
+        for (let j = 0; j < blocosNecessarios; j++) {
+            const atual = ordenados[i + j];
+            if (atual.status !== 'disponivel') { sequenciaOk = false; break; }
+            if (j > 0) {
+                const anterior = ordenados[i + j - 1];
+                const diff = stringParaData(dataString, atual.hora) - stringParaData(dataString, anterior.hora);
+                if (diff !== BLOCO_MINUTOS * 60000) { sequenciaOk = false; break; }
             }
         }
+        if (sequenciaOk) validos.push(ordenados[i]);
+    }
+
+    // Se for hoje, remove horários que já passaram (com 10 min de margem)
+    const agora = new Date();
+    if (dataString === dataParaString(agora)) {
+        const limite = new Date(agora.getTime() + 10 * 60000);
+        return validos.filter(h => stringParaData(dataString, h.hora) > limite);
+    }
+    return validos;
+}
+
+async function botEstaAtivo() {
+    try {
+        const config = await prisma.configuracao.findUnique({ where: { id: 1 } });
+        return config ? config.botAtivo : true;
+    } catch {
+        return true;
     }
 }
 
 // ==========================================
-// ⏰ ROTINAS AUTOMÁTICAS (CRON JOBS)
+// ENVIO DE ENQUETES (OPÇÕES CLICÁVEIS)
 // ==========================================
-function iniciarRotinaDiaria() {
-    const agora = new Date();
-    const amanha = new Date(agora.getFullYear(), agora.getMonth(), agora.getDate() + 1, 0, 1, 0); 
-    const msAteMeiaNoite = amanha - agora;
+async function enviarEnquete(chatId, pergunta, opcoes, tipo, textoAntes = null) {
+    // opcoes: [{ id, label }]
+    const opcoesLimitadas = opcoes
+        .slice(0, MAX_OPCOES_ENQUETE + 1)
+        .map(o => ({ ...o, label: String(o.label).substring(0, MAX_TAMANHO_OPCAO) }));
 
-    setTimeout(async () => {
-        const ontem = new Date(agora); ontem.setDate(ontem.getDate() - 1);
-        await prisma.horario.deleteMany({ where: { data: ontem.toLocaleDateString('pt-BR') } }); 
-        
-        lembretesEnviados.clear();
-        feedbacksEnviados.clear(); 
-        await gerarAgendaDoDiaAtual(); 
-        iniciarRotinaDiaria(); 
-    }, msAteMeiaNoite);
+    if (textoAntes) {
+        await client.sendMessage(chatId, textoAntes).catch(() => {});
+    }
+
+    const registro = { chatId, tipo, opcoes: opcoesLimitadas, criadaEm: Date.now() };
+
+    try {
+        const poll = new Poll(pergunta, opcoesLimitadas.map(o => o.label), { allowMultipleAnswers: false });
+        const enviada = await client.sendMessage(chatId, poll);
+        const messageId = enviada?.id?._serialized;
+        if (messageId) {
+            registro.messageId = messageId;
+            enquetesPorMensagem[messageId] = registro;
+        }
+        ultimaEnquetePorChat[chatId] = registro;
+        return true;
+    } catch (err) {
+        // Se a enquete falhar, cai automaticamente para o menu numerado
+        log('Falha ao enviar enquete, usando menu numerado:', err.message);
+        ultimaEnquetePorChat[chatId] = registro;
+        const menu = opcoesLimitadas.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
+        await client.sendMessage(chatId, `${pergunta}\n\n${menu}\n\n👉 Digite o número da opção desejada.`).catch(() => {});
+        return false;
+    }
 }
 
-function iniciarRotinaAutomativa() {
-    setInterval(async () => {
-        const agora = new Date();
-        const horaAtual = agora.getHours();
-        const minAtual = agora.getMinutes();
+// Converte texto digitado em um id de opção da última enquete do chat
+function resolverEscolhaPorTexto(chatId, texto) {
+    const registro = ultimaEnquetePorChat[chatId];
+    if (!registro) return null;
 
-        // 1. Resumo Diário às 08:30
-        if (horaAtual === 8 && minAtual === 30) {
-            enviarResumoParaBarbeiro();
+    const limpo = String(texto).trim().toLowerCase();
+
+    // 1) digitou o número da opção
+    if (/^\d{1,2}$/.test(limpo)) {
+        const idx = parseInt(limpo) - 1;
+        if (registro.opcoes[idx]) return registro.opcoes[idx].id;
+    }
+
+    // 2) digitou/copiou o texto exato da opção
+    const exato = registro.opcoes.find(o => o.label.toLowerCase() === limpo);
+    if (exato) return exato.id;
+
+    // 3) digitou parte reconhecível da opção
+    if (limpo.length >= 4) {
+        const parcial = registro.opcoes.find(o => o.label.toLowerCase().includes(limpo));
+        if (parcial) return parcial.id;
+    }
+
+    return null;
+}
+
+function limparEnquetesDoChat(chatId) {
+    const registro = ultimaEnquetePorChat[chatId];
+    if (registro?.messageId) delete enquetesPorMensagem[registro.messageId];
+    delete ultimaEnquetePorChat[chatId];
+}
+
+function encerrarAtendimento(chatId) {
+    delete estadosUsuarios[chatId];
+    delete dadosTemporarios[chatId];
+    limparEnquetesDoChat(chatId);
+}
+
+// ==========================================
+// MENUS DO FLUXO
+// ==========================================
+async function enviarMenuServicos(chatId, nomeCliente) {
+    const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
+    if (servicos.length === 0) {
+        return client.sendMessage(chatId, '⚠️ Estamos atualizando nossa lista de serviços. Tente novamente em alguns instantes.');
+    }
+
+    const opcoes = servicos.slice(0, MAX_OPCOES_ENQUETE).map(s => ({
+        id: `servico_${s.id}`,
+        label: `${s.nome} - R$ ${s.preco}`
+    }));
+    opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
+
+    estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
+    dadosTemporarios[chatId] = { servicosEscolhidos: [] };
+
+    const saudacao = `👋 Olá, ${nomeCliente}! Bem-vindo(a) à *${NOME_BARBEARIA}*.\n\nÉ só tocar no serviço desejado logo abaixo.`;
+    await enviarEnquete(chatId, '✂️ Qual serviço você deseja?', opcoes, 'SERVICO', saudacao);
+}
+
+async function enviarMenuAdicionarMais(chatId) {
+    const dados = dadosTemporarios[chatId];
+    if (!dados?.servicosEscolhidos?.length) return enviarMenuServicos(chatId, 'Cliente');
+
+    const nomes = dados.servicosEscolhidos.map(s => s.nome).join(' + ');
+    const tempo = dados.servicosEscolhidos.reduce((acc, s) => acc + (s.duracao || 30), 0);
+
+    estadosUsuarios[chatId] = 'ADICIONAR_MAIS';
+    const opcoes = [
+        { id: 'add_nao', label: 'Não, quero escolher a data' },
+        { id: 'add_sim', label: 'Sim, adicionar outro serviço' },
+        { id: 'cancelar', label: 'Cancelar atendimento' }
+    ];
+
+    const texto = `✅ Selecionado: *${nomes}* (aprox. ${tempo} min).`;
+    await enviarEnquete(chatId, 'Deseja adicionar outro serviço?', opcoes, 'ADICIONAR_MAIS', texto);
+}
+
+async function enviarMenuDatas(chatId) {
+    const opcoes = [];
+    const hoje = new Date();
+    const nomesDia = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado'];
+
+    for (let i = 0; i < 12 && opcoes.length < 6; i++) {
+        const dia = new Date(hoje.getFullYear(), hoje.getMonth(), hoje.getDate() + i);
+        if (dia.getDay() === 0) continue; // fechado aos domingos
+
+        const dataStr = dataParaString(dia);
+        let rotulo;
+        if (i === 0) rotulo = `Hoje (${dataStr.substring(0, 5)})`;
+        else if (i === 1) rotulo = `Amanhã (${dataStr.substring(0, 5)})`;
+        else rotulo = `${nomesDia[dia.getDay()]} (${dataStr.substring(0, 5)})`;
+
+        opcoes.push({ id: `data_${dataStr}`, label: rotulo });
+    }
+
+    opcoes.push({ id: 'data_outra', label: 'Outra data (vou digitar)' });
+    opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
+
+    estadosUsuarios[chatId] = 'ESCOLHENDO_DATA';
+    await enviarEnquete(chatId, '📅 Para qual dia você quer agendar?', opcoes, 'DATA');
+}
+
+async function enviarMenuHorarios(chatId, dataString, pagina = 0) {
+    const dados = dadosTemporarios[chatId];
+
+    // Sessão perdida (ex.: bot reiniciou no meio do atendimento)
+    if (!dados || !dados.blocosNecessarios) {
+        encerrarAtendimento(chatId);
+        await client.sendMessage(chatId, 'Sua sessão expirou. Vamos começar de novo, tudo bem?');
+        return enviarMenuServicos(chatId, 'Cliente');
+    }
+
+    const todosHorarios = await garantirAgendaDaData(dataString);
+
+    if (todosHorarios.length === 0) {
+        await client.sendMessage(chatId, `Não temos expediente em ${dataString}. Escolha outra data, por favor.`);
+        return enviarMenuDatas(chatId);
+    }
+
+    const validos = calcularHorariosValidos(todosHorarios, dados.blocosNecessarios, dataString);
+
+    if (validos.length === 0) {
+        dados.dataLotada = dataString;
+        estadosUsuarios[chatId] = 'FILA_ESPERA';
+        const texto = `😕 A agenda do dia *${dataString}* já está cheia para o tempo necessário (${dados.tempoTotal} min).`;
+        return enviarEnquete(chatId, 'Quer entrar na fila de espera desse dia?', [
+            { id: 'fila_sim', label: 'Sim, me avise se abrir vaga' },
+            { id: 'fila_nao', label: 'Não, quero escolher outra data' },
+            { id: 'cancelar', label: 'Cancelar atendimento' }
+        ], 'FILA', texto);
+    }
+
+    const porPagina = MAX_OPCOES_ENQUETE - 1;
+    const inicio = pagina * porPagina;
+    const fatia = validos.slice(inicio, inicio + porPagina);
+
+    if (fatia.length === 0) return enviarMenuHorarios(chatId, dataString, 0);
+
+    const opcoes = fatia.map(h => ({ id: `hora_${h.id}`, label: h.hora }));
+    if (validos.length > inicio + porPagina) {
+        opcoes.push({ id: `hora_mais_${pagina + 1}`, label: 'Ver mais horários' });
+    } else if (pagina > 0) {
+        opcoes.push({ id: 'hora_mais_0', label: 'Voltar ao início da lista' });
+    }
+    opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
+
+    dados.paginaHorarios = pagina;
+    dados.dataEscolhida = dataString;
+    estadosUsuarios[chatId] = 'ESCOLHENDO_HORARIO';
+
+    const texto = pagina === 0 ? `🕒 Horários livres para *${dataString}*:` : null;
+    await enviarEnquete(chatId, 'Toque no horário desejado', opcoes, 'HORARIO', texto);
+}
+
+// ==========================================
+// PROCESSAMENTO DE ESCOLHAS (enquete ou texto)
+// ==========================================
+async function processarEscolha(chatId, escolhaId, contato) {
+    const estado = estadosUsuarios[chatId];
+
+    if (escolhaId === 'cancelar') {
+        encerrarAtendimento(chatId);
+        return client.sendMessage(chatId, '❌ Atendimento cancelado. Quando quiser, é só mandar um "Oi". Estamos à disposição!');
+    }
+
+    // ---- SERVIÇO ----
+    if (estado === 'ESCOLHENDO_SERVICO' && escolhaId.startsWith('servico_')) {
+        const servicoId = parseInt(escolhaId.replace('servico_', ''));
+        const servico = await prisma.servico.findUnique({ where: { id: servicoId } });
+        if (!servico) return client.sendMessage(chatId, 'Serviço não encontrado. Envie "Oi" para recomeçar.');
+
+        if (!dadosTemporarios[chatId]) dadosTemporarios[chatId] = { servicosEscolhidos: [] };
+        dadosTemporarios[chatId].servicosEscolhidos.push(servico);
+
+        return enviarMenuAdicionarMais(chatId);
+    }
+
+    // ---- ADICIONAR MAIS SERVIÇOS ----
+    if (estado === 'ADICIONAR_MAIS') {
+        if (escolhaId === 'add_sim') {
+            const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
+            const jaEscolhidos = dadosTemporarios[chatId].servicosEscolhidos.map(s => s.id);
+            const restantes = servicos.filter(s => !jaEscolhidos.includes(s.id));
+
+            if (restantes.length === 0) {
+                await client.sendMessage(chatId, 'Você já selecionou todos os serviços disponíveis.');
+                return finalizarSelecaoServicos(chatId);
+            }
+
+            const opcoes = restantes.slice(0, MAX_OPCOES_ENQUETE).map(s => ({
+                id: `servico_${s.id}`,
+                label: `${s.nome} - R$ ${s.preco}`
+            }));
+            opcoes.push({ id: 'cancelar', label: 'Cancelar atendimento' });
+
+            estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
+            return enviarEnquete(chatId, '✂️ Qual serviço você quer adicionar?', opcoes, 'SERVICO');
         }
 
-        // 2. Lembretes de 15 min (Futuro)
-        const futuro = new Date(agora.getTime() + 15 * 60000);
-        const dataFuturo = `${String(futuro.getDate()).padStart(2, '0')}/${String(futuro.getMonth() + 1).padStart(2, '0')}/${futuro.getFullYear()}`; 
-        const horaAlvoFuturo = `${String(futuro.getHours()).padStart(2, '0')}:${String(futuro.getMinutes()).padStart(2, '0')}`;
+        if (escolhaId === 'add_nao') return finalizarSelecaoServicos(chatId);
+    }
 
-        try {
-            const reservasFuturas = await prisma.horario.findMany({
-                where: { data: dataFuturo, hora: horaAlvoFuturo, status: 'ocupado' }
-            });
+    // ---- DATA ----
+    if (estado === 'ESCOLHENDO_DATA' && escolhaId.startsWith('data_')) {
+        if (escolhaId === 'data_outra') {
+            estadosUsuarios[chatId] = 'DIGITANDO_DATA';
+            return client.sendMessage(chatId, '📅 Sem problema! Digite a data desejada no formato dia/mês.\n_Exemplo: 28/08_');
+        }
+        return enviarMenuHorarios(chatId, escolhaId.replace('data_', ''), 0);
+    }
 
-            for (const reserva of reservasFuturas) {
-                if (!reserva.whatsapp || reserva.whatsapp === 'Painel Web') continue;
-                if (lembretesEnviados.has(reserva.id)) continue;
-
-                const msg = `🔔 *Lembrete de Agendamento - Jonathan's Barber Shop*\n\nOlá, ${reserva.cliente}! Passando para lembrar do seu agendamento de *${reserva.servico}* hoje às *${reserva.hora}*. Estamos te aguardando! ✂️`;
-                await client.sendMessage(reserva.whatsapp + '@c.us', msg);
-                lembretesEnviados.add(reserva.id);
+    // ---- FILA DE ESPERA ----
+    if (estado === 'FILA_ESPERA') {
+        if (escolhaId === 'fila_sim') {
+            const dataFila = dadosTemporarios[chatId]?.dataLotada;
+            if (dataFila) {
+                try {
+                    await prisma.filaEspera.upsert({
+                        where: { data_chatId: { data: dataFila, chatId } },
+                        update: {},
+                        create: { data: dataFila, chatId, cliente: contato?.pushname || null }
+                    });
+                } catch (err) { log('Erro ao salvar fila:', err.message); }
             }
-        } catch (error) { console.error("❌ Erro no Vigia de Lembretes:", error); }
+            encerrarAtendimento(chatId);
+            return client.sendMessage(chatId, `✅ Pronto! Você entrou na fila de espera do dia *${dataFila}*.\n\nSe abrir vaga, avisamos por aqui na hora.`);
+        }
+        if (escolhaId === 'fila_nao') return enviarMenuDatas(chatId);
+    }
 
-        // 3. Feedback Pós-venda (2 horas no Passado)
-        const passado = new Date(agora.getTime() - 2 * 60 * 60000);
-        const dataPassado = `${String(passado.getDate()).padStart(2, '0')}/${String(passado.getMonth() + 1).padStart(2, '0')}/${passado.getFullYear()}`;
-        const horaAlvoPassado = `${String(passado.getHours()).padStart(2, '0')}:${String(passado.getMinutes()).padStart(2, '0')}`;
+    // ---- HORÁRIO ----
+    if (estado === 'ESCOLHENDO_HORARIO') {
+        if (escolhaId.startsWith('hora_mais_')) {
+            const pagina = parseInt(escolhaId.replace('hora_mais_', ''));
+            return enviarMenuHorarios(chatId, dadosTemporarios[chatId]?.dataEscolhida, pagina);
+        }
 
-        try {
-            const cortesFinalizados = await prisma.horario.findMany({
-                where: { data: dataPassado, hora: horaAlvoPassado, status: 'ocupado' }
-            });
+        if (escolhaId.startsWith('hora_')) {
+            const horarioId = parseInt(escolhaId.replace('hora_', ''));
+            const horario = await prisma.horario.findUnique({ where: { id: horarioId } });
 
-            for (const corte of cortesFinalizados) {
-                if (!corte.whatsapp || corte.whatsapp === 'Painel Web') continue;
-                if (feedbacksEnviados.has(corte.id)) continue;
-
-                const chatId = corte.whatsapp + '@c.us';
-                const msgFeedback = `Olá, ${corte.cliente}! Esperamos que tenha tido uma excelente experiência com o seu serviço de hoje (✂️ ${corte.servico}).\n\nSua opinião é muito importante para nós! Como você avalia nosso atendimento?\nPor favor, responda com uma nota de *1 a 5* ⭐.`;
-                
-                await client.sendMessage(chatId, msgFeedback);
-                estadosUsuarios[chatId] = 'AGUARDANDO_AVALIACAO';
-                feedbacksEnviados.add(corte.id);
+            if (!horario || horario.status !== 'disponivel') {
+                await client.sendMessage(chatId, '⚠️ Esse horário acabou de ser reservado. Escolha outro, por favor.');
+                return enviarMenuHorarios(chatId, dadosTemporarios[chatId]?.dataEscolhida, 0);
             }
-        } catch (error) { console.error("❌ Erro no Feedback:", error); }
 
-    }, 60 * 1000);
+            dadosTemporarios[chatId].horarioId = horario.id;
+            dadosTemporarios[chatId].horarioHora = horario.hora;
+
+            const nomePerfil = contato?.pushname?.trim();
+            estadosUsuarios[chatId] = 'DIGITANDO_NOME';
+
+            const aviso = `✅ Horário das *${horario.hora}* do dia *${dadosTemporarios[chatId].dataEscolhida}* pré-reservado para você.`;
+
+            if (nomePerfil && nomePerfil.length >= 2) {
+                return enviarEnquete(chatId, '👤 Confirmamos em qual nome?', [
+                    { id: 'nome_perfil', label: `Usar o nome ${nomePerfil}` },
+                    { id: 'nome_outro', label: 'Digitar outro nome' },
+                    { id: 'cancelar', label: 'Cancelar atendimento' }
+                ], 'NOME', aviso);
+            }
+
+            return client.sendMessage(chatId, `${aviso}\n\n👤 Para finalizar, digite seu *primeiro nome*:`);
+        }
+    }
+
+    // ---- NOME ----
+    if (estado === 'DIGITANDO_NOME') {
+        if (escolhaId === 'nome_perfil') {
+            return confirmarAgendamento(chatId, contato?.pushname?.trim() || 'Cliente', contato);
+        }
+        if (escolhaId === 'nome_outro') {
+            estadosUsuarios[chatId] = 'DIGITANDO_NOME_TEXTO';
+            limparEnquetesDoChat(chatId);
+            return client.sendMessage(chatId, '👤 Certo! Digite o *primeiro nome* para o agendamento:');
+        }
+    }
+
+    // ---- AVALIAÇÃO ----
+    if (estado === 'AGUARDANDO_AVALIACAO' && escolhaId.startsWith('nota_')) {
+        return registrarAvaliacao(chatId, parseInt(escolhaId.replace('nota_', '')), contato);
+    }
+
+    return null;
 }
 
-async function enviarResumoParaBarbeiro() {
-    const dataHoje = new Date().toLocaleDateString('pt-BR');
-    
-    const reservas = await prisma.horario.findMany({
-        where: { data: dataHoje, status: 'ocupado' },
+function finalizarSelecaoServicos(chatId) {
+    const dados = dadosTemporarios[chatId];
+    if (!dados?.servicosEscolhidos?.length) return enviarMenuServicos(chatId, 'Cliente');
+
+    const tempoTotal = dados.servicosEscolhidos.reduce((acc, s) => acc + (s.duracao || 30), 0);
+
+    dados.servicoNome = dados.servicosEscolhidos.map(s => s.nome).join(' + ');
+    dados.tempoTotal = tempoTotal;
+    dados.blocosNecessarios = Math.max(1, Math.ceil(tempoTotal / BLOCO_MINUTOS));
+
+    return enviarMenuDatas(chatId);
+}
+
+// ==========================================
+// CONFIRMAÇÃO DO AGENDAMENTO
+// ==========================================
+async function confirmarAgendamento(chatId, nomeCliente, contato) {
+    const dados = dadosTemporarios[chatId];
+    if (!dados || !dados.horarioId || !dados.dataEscolhida) {
+        encerrarAtendimento(chatId);
+        return client.sendMessage(chatId, 'Sua sessão expirou. Envie "Oi" para recomeçar o agendamento.');
+    }
+
+    const numeroReal = contato?.number || chatId.split('@')[0];
+    const dataString = dados.dataEscolhida;
+
+    // Busca os blocos consecutivos a partir do horário escolhido
+    const todosDoDia = await prisma.horario.findMany({
+        where: { data: dataString },
         orderBy: { hora: 'asc' }
     });
 
-    let resumo = `📅 *Resumo da Agenda para hoje (${dataHoje})*\n\n`;
-    if (reservas.length === 0) {
-        resumo += "Nenhum agendamento para hoje ainda.";
-    } else {
-        reservas.forEach(r => { resumo += `🕒 ${r.hora} - ${r.cliente} (${r.servico})\n`; });
+    const idxInicio = todosDoDia.findIndex(h => h.id === dados.horarioId);
+    if (idxInicio === -1) {
+        encerrarAtendimento(chatId);
+        return client.sendMessage(chatId, 'Não localizamos esse horário. Envie "Oi" para recomeçar.');
     }
 
+    const slotsParaOcupar = todosDoDia.slice(idxInicio, idxInicio + dados.blocosNecessarios);
+    const todosLivres =
+        slotsParaOcupar.length === dados.blocosNecessarios &&
+        slotsParaOcupar.every(s => s.status === 'disponivel');
+
+    if (!todosLivres) {
+        estadosUsuarios[chatId] = 'ESCOLHENDO_HORARIO';
+        await client.sendMessage(chatId, '⚠️ Esse horário acabou de ser reservado por outro cliente. Escolha outro, por favor.');
+        return enviarMenuHorarios(chatId, dataString, 0);
+    }
+
+    const grupoId = crypto.randomUUID();
+
+    // Reserva condicional: só ocupa se ainda estiver disponível (evita reserva dupla)
+    const resultado = await prisma.horario.updateMany({
+        where: { id: { in: slotsParaOcupar.map(s => s.id) }, status: 'disponivel' },
+        data: {
+            status: 'ocupado',
+            cliente: nomeCliente,
+            servico: dados.servicoNome,
+            whatsapp: numeroReal,
+            chatId: chatId,
+            grupoId: grupoId,
+            lembreteEnviado: false,
+            feedbackEnviado: false
+        }
+    });
+
+    if (resultado.count !== slotsParaOcupar.length) {
+        // Desfaz a reserva parcial e pede outro horário
+        await prisma.horario.updateMany({
+            where: { grupoId },
+            data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null, chatId: null, grupoId: null }
+        });
+        estadosUsuarios[chatId] = 'ESCOLHENDO_HORARIO';
+        await client.sendMessage(chatId, '⚠️ Esse horário acabou de ser reservado. Escolha outro, por favor.');
+        return enviarMenuHorarios(chatId, dataString, 0);
+    }
+
+    const msgCliente =
+        `🎉 *Agendamento confirmado!*\n\n` +
+        `👤 *Cliente:* ${nomeCliente}\n` +
+        `✂️ *Serviço:* ${dados.servicoNome}\n` +
+        `📅 *Data:* ${dataString}\n` +
+        `🕒 *Horário:* ${dados.horarioHora}\n\n` +
+        `Obrigado pela preferência! Se precisar cancelar, é só enviar *cancelar agendamento*.`;
+
+    const msgBarbeiro =
+        `🚨 *NOVO AGENDAMENTO*\n\n` +
+        `👤 Cliente: *${nomeCliente}*\n` +
+        `📱 Contato: ${numeroReal}\n` +
+        `✂️ Serviço: ${dados.servicoNome}\n` +
+        `📅 Data: ${dataString}\n` +
+        `🕒 Horário: *${dados.horarioHora}*`;
+
+    await client.sendMessage(chatId, msgCliente);
+    await notificarBarbeiro(msgBarbeiro);
+
+    log('Agendamento confirmado:', nomeCliente, dataString, dados.horarioHora);
+    encerrarAtendimento(chatId);
+}
+
+async function notificarBarbeiro(mensagem) {
     try {
         const idVerificado = await client.getNumberId(NUMERO_DO_BARBEIRO);
-        if (idVerificado) await client.sendMessage(idVerificado._serialized, resumo);
-    } catch (err) { console.error("Erro ao enviar resumo:", err.message); }
+        if (idVerificado) await client.sendMessage(idVerificado._serialized, mensagem);
+    } catch (err) {
+        log('Erro ao notificar o barbeiro:', err.message);
+    }
+}
+
+async function registrarAvaliacao(chatId, nota, contato) {
+    encerrarAtendimento(chatId);
+
+    try {
+        await prisma.avaliacao.create({
+            data: {
+                cliente: contato?.pushname || null,
+                whatsapp: contato?.number || chatId.split('@')[0],
+                nota
+            }
+        });
+    } catch (err) { log('Erro ao salvar avaliação:', err.message); }
+
+    if (nota >= 4) {
+        return client.sendMessage(chatId, '⭐ Muito obrigado pela avaliação! Ficamos felizes que tenha gostado. Até a próxima!');
+    }
+
+    await notificarBarbeiro(`⚠️ *ALERTA DE QUALIDADE*\n\nO cliente ${contato?.pushname || chatId} avaliou o atendimento com nota *${nota}*.`);
+    return client.sendMessage(chatId, 'Obrigado pelo feedback sincero! Vamos trabalhar para melhorar e te surpreender na próxima visita. 🙌');
 }
 
 // ==========================================
-// 🌐 ROTAS DA API (EXPRESS)
+// FILA DE ESPERA
 // ==========================================
-app.get('/health', (req, res) => res.status(200).send('OK'));
+async function avisarFila(dataVaga) {
+    if (!dataVaga) return;
+    try {
+        const fila = await prisma.filaEspera.findMany({ where: { data: dataVaga } });
+        if (fila.length === 0) return;
+
+        const msg = `🚨 *Vaga liberada!*\n\nAbriu um horário para o dia *${dataVaga}*.\n\nSe ainda tiver interesse, envie um "Oi" aqui para garantir a vaga.`;
+        for (const item of fila) {
+            await client.sendMessage(item.chatId, msg).catch(() => {});
+        }
+        await prisma.filaEspera.deleteMany({ where: { data: dataVaga } });
+        log('Fila de espera avisada:', dataVaga, `(${fila.length} pessoas)`);
+    } catch (err) {
+        log('Erro ao avisar a fila:', err.message);
+    }
+}
+
+// ==========================================
+// ROTINAS AUTOMÁTICAS
+// ==========================================
+
+// Lembrete ~15 min antes. Usa JANELA de tempo (não match exato de minuto),
+// deduplica por grupoId e persiste o envio no banco.
+async function verificarLembretes() {
+    if (!clienteConectado) return;
+
+    const agora = new Date();
+    const datasRelevantes = [
+        dataParaString(agora),
+        dataParaString(new Date(agora.getTime() + 24 * 3600000))
+    ];
+
+    try {
+        const candidatos = await prisma.horario.findMany({
+            where: {
+                data: { in: datasRelevantes },
+                status: 'ocupado',
+                lembreteEnviado: false,
+                grupoId: { not: null }
+            },
+            orderBy: { hora: 'asc' }
+        });
+
+        // Mantém apenas o primeiro bloco de cada agendamento
+        const primeiroPorGrupo = new Map();
+        for (const slot of candidatos) {
+            if (!primeiroPorGrupo.has(slot.grupoId)) primeiroPorGrupo.set(slot.grupoId, slot);
+        }
+
+        for (const slot of primeiroPorGrupo.values()) {
+            const destino = slot.chatId || (slot.whatsapp ? `${slot.whatsapp}@c.us` : null);
+            if (!destino || slot.whatsapp === 'Painel Web') continue;
+
+            const minutosAte = (stringParaData(slot.data, slot.hora) - agora) / 60000;
+
+            // Janela de 12 a 18 min: tolera atraso do timer sem perder o lembrete
+            if (minutosAte < 12 || minutosAte > 18) continue;
+
+            const msg =
+                `🔔 *Lembrete de agendamento - ${NOME_BARBEARIA}*\n\n` +
+                `Olá, ${slot.cliente}! Seu horário de *${slot.servico}* é hoje às *${slot.hora}*.\n` +
+                `Estamos te aguardando! ✂️`;
+
+            try {
+                await client.sendMessage(destino, msg);
+                await prisma.horario.updateMany({
+                    where: { grupoId: slot.grupoId },
+                    data: { lembreteEnviado: true }
+                });
+                log('Lembrete enviado:', slot.cliente, slot.hora);
+            } catch (err) {
+                log('Falha ao enviar lembrete:', err.message);
+            }
+        }
+    } catch (err) {
+        log('Erro na rotina de lembretes:', err.message);
+    }
+}
+
+// Feedback ~2h depois do FIM do atendimento (a versão antiga usava o início e repetia por bloco)
+async function verificarFeedbacks() {
+    if (!clienteConectado) return;
+
+    const agora = new Date();
+    if (agora.getHours() < 8 || agora.getHours() >= 21) return; // não incomoda de madrugada
+
+    const datasRelevantes = [
+        dataParaString(agora),
+        dataParaString(new Date(agora.getTime() - 24 * 3600000))
+    ];
+
+    try {
+        const candidatos = await prisma.horario.findMany({
+            where: {
+                data: { in: datasRelevantes },
+                status: 'ocupado',
+                feedbackEnviado: false,
+                grupoId: { not: null }
+            },
+            orderBy: { hora: 'desc' }
+        });
+
+        // Último bloco de cada agendamento = fim do atendimento
+        const ultimoPorGrupo = new Map();
+        for (const slot of candidatos) {
+            if (!ultimoPorGrupo.has(slot.grupoId)) ultimoPorGrupo.set(slot.grupoId, slot);
+        }
+
+        for (const slot of ultimoPorGrupo.values()) {
+            const destino = slot.chatId || (slot.whatsapp ? `${slot.whatsapp}@c.us` : null);
+            if (!destino || slot.whatsapp === 'Painel Web') continue;
+
+            const fim = new Date(stringParaData(slot.data, slot.hora).getTime() + BLOCO_MINUTOS * 60000);
+            const minutosDesde = (agora - fim) / 60000;
+
+            // Janela de 2h a 2h06 depois do fim
+            if (minutosDesde < 120 || minutosDesde > 126) continue;
+
+            try {
+                // Marca antes de enviar para nunca duplicar
+                await prisma.horario.updateMany({
+                    where: { grupoId: slot.grupoId },
+                    data: { feedbackEnviado: true }
+                });
+
+                estadosUsuarios[destino] = 'AGUARDANDO_AVALIACAO';
+                await enviarEnquete(destino, '⭐ Como você avalia nosso atendimento?', [
+                    { id: 'nota_5', label: '5 - Excelente' },
+                    { id: 'nota_4', label: '4 - Muito bom' },
+                    { id: 'nota_3', label: '3 - Regular' },
+                    { id: 'nota_2', label: '2 - Ruim' },
+                    { id: 'nota_1', label: '1 - Péssimo' }
+                ], 'AVALIACAO',
+                    `Olá, ${slot.cliente}! Esperamos que tenha gostado do seu *${slot.servico}* de hoje.\n\nSua opinião é muito importante para nós.`);
+
+                log('Feedback solicitado:', slot.cliente);
+            } catch (err) {
+                log('Falha ao enviar feedback:', err.message);
+            }
+        }
+    } catch (err) {
+        log('Erro na rotina de feedback:', err.message);
+    }
+}
+
+let resumoEnviadoEm = null;
+async function verificarResumoDiario() {
+    if (!clienteConectado) return;
+
+    const agora = new Date();
+    const hojeStr = dataParaString(agora);
+    const minutosDoDia = agora.getHours() * 60 + agora.getMinutes();
+
+    // Envia entre 08:30 e 08:40, uma única vez por dia
+    if (minutosDoDia < 510 || minutosDoDia > 520) return;
+    if (resumoEnviadoEm === hojeStr) return;
+    resumoEnviadoEm = hojeStr;
+
+    try {
+        const reservas = await prisma.horario.findMany({
+            where: { data: hojeStr, status: 'ocupado', grupoId: { not: null } },
+            orderBy: { hora: 'asc' }
+        });
+
+        const porGrupo = new Map();
+        for (const r of reservas) if (!porGrupo.has(r.grupoId)) porGrupo.set(r.grupoId, r);
+
+        let resumo = `📅 *Agenda de hoje (${hojeStr})*\n\n`;
+        if (porGrupo.size === 0) resumo += 'Nenhum agendamento por enquanto.';
+        else for (const r of porGrupo.values()) resumo += `🕒 ${r.hora} - ${r.cliente} (${r.servico})\n`;
+
+        await notificarBarbeiro(resumo);
+        log('Resumo diário enviado.');
+    } catch (err) {
+        log('Erro no resumo diário:', err.message);
+    }
+}
+
+async function limpezaDiaria() {
+    try {
+        const antiga = new Date();
+        antiga.setDate(antiga.getDate() - 2);
+        const limite = dataParaString(antiga);
+
+        await prisma.horario.deleteMany({ where: { data: limite } });
+        await prisma.filaEspera.deleteMany({ where: { data: limite } });
+        await garantirAgendaDaData(dataParaString(new Date()));
+
+        log('Limpeza diária concluída.');
+    } catch (err) {
+        log('Erro na limpeza diária:', err.message);
+    }
+}
+
+let ultimaLimpeza = null;
+let rotinasAtivas = false;
+function iniciarRotinas() {
+    if (rotinasAtivas) return;
+    rotinasAtivas = true;
+
+    setInterval(async () => {
+        try {
+            await verificarResumoDiario();
+            await verificarLembretes();
+            await verificarFeedbacks();
+
+            const hojeStr = dataParaString(new Date());
+            if (ultimaLimpeza !== hojeStr && new Date().getHours() >= 1) {
+                ultimaLimpeza = hojeStr;
+                await limpezaDiaria();
+            }
+        } catch (err) {
+            log('Erro no ciclo de rotinas:', err.message);
+        }
+    }, 60 * 1000);
+
+    log('Rotinas automáticas iniciadas (lembretes, feedback, resumo e limpeza).');
+}
+
+// ==========================================
+// ROTAS DA API
+// ==========================================
+app.get('/health', async (req, res) => {
+    let estadoWpp = 'DESCONHECIDO';
+    try { estadoWpp = (await client.getState()) || 'SEM_ESTADO'; } catch { estadoWpp = 'INDISPONIVEL'; }
+
+    const saudavel = clienteConectado && estadoWpp === 'CONNECTED';
+    res.status(saudavel ? 200 : 503).json({
+        ok: saudavel,
+        whatsapp: estadoWpp,
+        uptimeSegundos: Math.round(process.uptime()),
+        memoriaMB: Math.round(process.memoryUsage().rss / 1024 / 1024)
+    });
+});
 
 app.get('/api/servicos', async (req, res) => {
     try {
-        const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
-        res.json(servicos);
-    } catch (error) { res.status(500).json({ erro: "Erro ao buscar serviços" }); }
+        res.json(await prisma.servico.findMany({ orderBy: { id: 'asc' } }));
+    } catch { res.status(500).json({ erro: 'Erro ao buscar serviços' }); }
 });
 
 app.post('/api/servicos', async (req, res) => {
     try {
         const { nome, preco, duracao } = req.body;
-        const novoServico = await prisma.servico.create({ data: { nome, preco, duracao: parseInt(duracao) || 30 } });
-        res.status(201).json(novoServico);
-    } catch (error) { res.status(500).json({ erro: "Erro ao criar serviço" }); }
+        const novo = await prisma.servico.create({
+            data: { nome, preco, duracao: parseInt(duracao) || 30 }
+        });
+        res.status(201).json(novo);
+    } catch { res.status(500).json({ erro: 'Erro ao criar serviço' }); }
 });
 
 app.delete('/api/servicos/:id', async (req, res) => {
     try {
-        const { id } = req.params;
-        await prisma.servico.delete({ where: { id: parseInt(id) } });
-        res.json({ mensagem: "Serviço removido" });
-    } catch (error) { res.status(500).json({ erro: "Erro ao remover serviço" }); }
+        await prisma.servico.delete({ where: { id: parseInt(req.params.id) } });
+        res.json({ mensagem: 'Serviço removido' });
+    } catch { res.status(500).json({ erro: 'Erro ao remover serviço' }); }
 });
 
 app.get('/api/horarios', async (req, res) => {
     try {
         const { data } = req.query;
-        const filtro = data ? { data: data } : {};
-        let horarios = await prisma.horario.findMany({ where: filtro, orderBy: { id: 'asc' } });
-
-        if (data && horarios.length > 0) {
-            const horasUnicas = new Set();
-            let temDuplicata = false;
-            for (const h of horarios) {
-                if (horasUnicas.has(h.hora)) { temDuplicata = true; break; }
-                horasUnicas.add(h.hora);
-            }
-            if (temDuplicata) {
-                await prisma.horario.deleteMany({ where: filtro });
-                horarios = []; 
-            }
-        }
-
-        if (data && horarios.length === 0) {
-            if (gerandoAgendaLock[data]) return res.json([]); 
-            gerandoAgendaLock[data] = true;
-
-            try {
-                const [d, m, y] = data.split('/');
-                const dataObj = new Date(y, m - 1, d);
-                
-                if (dataObj.getDay() !== 0) { 
-                    let hFim = (dataObj.getDay() === 6) ? '18:00' : '19:00'; 
-                    const novosSlots = gerarHorarios('09:00', hFim, 15);
-                    for (const slot of novosSlots) {
-                        await prisma.horario.create({ data: { ...slot, data } });
-                    }
-                    horarios = await prisma.horario.findMany({ where: filtro, orderBy: { id: 'asc' } });
-                }
-            } finally { delete gerandoAgendaLock[data]; }
-        }
-        res.json(horarios);
-    } catch (error) { res.status(500).json({ erro: "Erro ao buscar agenda" }); }
+        if (!data) return res.json(await prisma.horario.findMany({ orderBy: { id: 'asc' } }));
+        res.json(await garantirAgendaDaData(data));
+    } catch { res.status(500).json({ erro: 'Erro ao buscar agenda' }); }
 });
 
 app.put('/api/horarios/:id', async (req, res) => {
     try {
-        const { id } = req.params;
+        const id = parseInt(req.params.id);
         const { status, cliente, servico } = req.body;
-        
-        const horarioAntigo = await prisma.horario.findUnique({ where: { id: parseInt(id) } });
-        const horarioAtualizado = await prisma.horario.update({
-            where: { id: parseInt(id) },
+        const liberando = status === 'disponivel';
+
+        const antigo = await prisma.horario.findUnique({ where: { id } });
+        const atualizado = await prisma.horario.update({
+            where: { id },
             data: {
                 status,
-                cliente: status === 'disponivel' ? null : (cliente || 'Presencial/Balcão'),
-                servico: status === 'disponivel' ? null : (servico || 'Não especificado'),
-                whatsapp: status === 'disponivel' ? null : 'Painel Web'
+                cliente: liberando ? null : (cliente || 'Presencial/Balcão'),
+                servico: liberando ? null : (servico || 'Não especificado'),
+                whatsapp: liberando ? null : 'Painel Web',
+                chatId: liberando ? null : undefined,
+                grupoId: liberando ? null : undefined,
+                lembreteEnviado: liberando ? false : undefined,
+                feedbackEnviado: liberando ? false : undefined
             }
         });
 
-        if (status === 'disponivel' && horarioAntigo && horarioAntigo.status === 'ocupado') {
-            avisarFila(horarioAtualizado.data);
-        }
-        res.json(horarioAtualizado);
-    } catch (error) { res.status(500).json({ erro: "Erro ao atualizar horário" }); }
+        if (liberando && antigo?.status === 'ocupado') avisarFila(atualizado.data);
+        res.json(atualizado);
+    } catch { res.status(500).json({ erro: 'Erro ao atualizar horário' }); }
+});
+
+app.get('/api/avaliacoes', async (req, res) => {
+    try {
+        const avaliacoes = await prisma.avaliacao.findMany({ orderBy: { criadoEm: 'desc' }, take: 100 });
+        const media = avaliacoes.length
+            ? (avaliacoes.reduce((a, b) => a + b.nota, 0) / avaliacoes.length).toFixed(2)
+            : null;
+        res.json({ media, total: avaliacoes.length, avaliacoes });
+    } catch { res.status(500).json({ erro: 'Erro ao buscar avaliações' }); }
 });
 
 app.post('/api/bot/status', async (req, res) => {
@@ -336,338 +974,333 @@ app.post('/api/bot/status', async (req, res) => {
             update: { botAtivo: ativo },
             create: { id: 1, botAtivo: ativo }
         });
-        res.json({ mensagem: "Status alterado" });
-    } catch (error) { res.status(500).json({ erro: "Erro ao mudar status" }); }
+        log('Bot', ativo ? 'ATIVADO' : 'DESATIVADO', 'pelo painel.');
+        res.json({ mensagem: 'Status alterado' });
+    } catch { res.status(500).json({ erro: 'Erro ao mudar status' }); }
 });
 
 app.get('/api/bot/status', async (req, res) => {
-    const config = await prisma.configuracao.findUnique({ where: { id: 1 } });
-    res.json({ ativo: config ? config.botAtivo : true });
+    res.json({ ativo: await botEstaAtivo(), conectado: clienteConectado });
 });
 
 // ==========================================
-// 🤖 CLIENTE DO WHATSAPP (BOT)
+// CLIENTE DO WHATSAPP
 // ==========================================
 const client = new Client({
     authStrategy: new LocalAuth(),
     webVersionCache: { type: 'none' },
+    takeoverOnConflict: true,
+    takeoverTimeoutMs: 10000,
     puppeteer: {
-        headless: true, 
-        executablePath: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-extensions']
+        headless: true,
+        executablePath: CHROME_PATH,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-extensions',
+            '--disable-gpu',
+            '--no-first-run',
+            '--mute-audio'
+        ]
     }
 });
 
 client.on('loading_screen', (percent, message) => {
-    console.log(`⏳ [Bot]: Carregando WhatsApp... ${percent}% | ${message}`);
+    log(`Carregando WhatsApp: ${percent}% | ${message}`);
 });
-client.on('qr', (qr) => { qrcode.generate(qr, { small: true }); });
+
+client.on('qr', (qr) => {
+    log('QR Code gerado. Escaneie com o WhatsApp da barbearia.');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('authenticated', () => log('Autenticado com sucesso.'));
+
+client.on('auth_failure', (msg) => {
+    log('FALHA DE AUTENTICAÇÃO:', msg);
+    log('A sessão provavelmente expirou. O processo vai reiniciar para mostrar o QR Code.');
+    process.exit(1);
+});
+
+client.on('change_state', (state) => log('Estado do WhatsApp:', state));
 
 client.on('ready', async () => {
-    console.log('\n🚀 [Bot]: Sistema Múltiplos Serviços Iniciado!\n');
-    await gerarAgendaDoDiaAtual();
-    iniciarRotinaDiaria();
-    iniciarRotinaAutomativa(); 
+    clienteConectado = true;
+    reconectando = false;
+    log(`Bot conectado! ${NOME_BARBEARIA}`);
+
+    await garantirAgendaDaData(dataParaString(new Date()));
+    iniciarRotinas();
+    iniciarWatchdog();
 });
 
-client.on('message', async (msg) => {
-    const chatId = msg.from; 
+client.on('disconnected', async (reason) => {
+    clienteConectado = false;
+    log('DESCONECTADO:', reason);
+    await reconectar();
+});
 
-    // 🛡️ ESCUDOS ANTI-LIXO E MENSAGENS DE SISTEMA
-    const tiposDeSistema = ['e2e_notification', 'protocol', 'call_log', 'gp2', 'notification_template'];
-    if (tiposDeSistema.includes(msg.type)) return; 
-    if (chatId.includes('@newsletter') || chatId.endsWith('@g.us') || chatId === 'status@broadcast') return;
+// ==========================================
+// RECONEXÃO E WATCHDOG
+// ==========================================
+async function reconectar() {
+    if (reconectando) return;
+    reconectando = true;
 
-    // 🛑 ESCUDO DO BARBEIRO
-    if (msg.fromMe) return; 
-    if (chatId === NUMERO_DO_BARBEIRO + '@c.us') return; 
-    if (chatId === '213610265579641@lid') return; 
-    if (numerosBloqueados.includes(chatId)) return;
+    log('Tentando reconectar em 10 segundos...');
+    await new Promise(r => setTimeout(r, 10000));
 
-    console.log(`\n🚨 [RAIO-X] Mensagem recebida! De: ${chatId} | Texto: ${msg.body}`);
-
-    const contato = await msg.getContact();
-    const numeroReal = contato.number || ""; 
-    const nomeWhatsApp = contato.pushname || "Cliente";
-
-    if (msg.hasMedia || msg.type === 'audio' || msg.type === 'ptt') {
-        return msg.reply('🤖 Olá! Sou o assistente virtual da barbearia. No momento, não consigo processar áudios ou imagens. Por favor, envie sua mensagem em texto para que eu possa ajudar!');
+    try {
+        await client.destroy().catch(() => {});
+        await client.initialize();
+        log('Reconexão iniciada.');
+        reconectando = false;
+    } catch (err) {
+        log('Falha ao reconectar:', err.message, '- reiniciando o processo.');
+        process.exit(1); // PM2 sobe de novo com ambiente limpo
     }
+}
 
-    const textoRecebido = msg.body.trim().toLowerCase();
-    if (textoRecebido.startsWith('!')) return; 
+let watchdogAtivo = false;
+function iniciarWatchdog() {
+    if (watchdogAtivo) return;
+    watchdogAtivo = true;
 
-    if (textoRecebido === 'cancelar' || msg.body === '❌ Cancelar atendimento') {
-        delete estadosUsuarios[chatId];
-        delete dadosTemporarios[chatId];
-        return msg.reply('❌ Seu atendimento foi cancelado. Caso deseje iniciar novamente, basta enviar um "Oi". Estaremos à disposição!');
-    }
-
-    // PASSO 0.5: PROCESSAR AVALIAÇÃO DE FEEDBACK
-    if (estadosUsuarios[chatId] === 'AGUARDANDO_AVALIACAO') {
-        const nota = textoRecebido.trim();
-        if (['1', '2', '3', '4', '5'].includes(nota)) {
-            delete estadosUsuarios[chatId]; 
-            if (nota === '5' || nota === '4') {
-                return msg.reply(`⭐⭐⭐⭐⭐\nMuito obrigado pela sua avaliação, ${nomeWhatsApp}! Ficamos imensamente felizes que tenha gostado do nosso trabalho. Será um prazer recebê-lo(a) novamente. Até a próxima! 🚀`);
-            } else {
-                try {
-                    const idVerificado = await client.getNumberId(NUMERO_DO_BARBEIRO);
-                    if (idVerificado) await client.sendMessage(idVerificado._serialized, `⚠️ *ALERTA DE QUALIDADE!*\n\nO cliente *${nomeWhatsApp}* avaliou o último atendimento com nota *${nota}*.`);
-                } catch (err) {}
-                return msg.reply(`Obrigado pelo seu feedback sincero, ${nomeWhatsApp}! Sempre buscamos melhorar nossos serviços. Esperamos te surpreender positivamente na próxima visita! 🙌`);
-            }
-        } else {
-            delete estadosUsuarios[chatId];
-        }
-    }
-
-    // ===============================================
-    // 🔘 NOVO MENU INTERATIVO (USANDO LIST)
-    // ===============================================
-    // PASSO 1: MENU INICIAL
-    if (!estadosUsuarios[chatId] || estadosUsuarios[chatId] === 'INICIO') {
-        const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
-        if (servicos.length === 0) return msg.reply('⚠️ No momento estamos atualizando nossa lista de serviços. Por favor, tente novamente em alguns instantes.');
-
-        estadosUsuarios[chatId] = 'ESCOLHENDO_SERVICO';
-        
-        let rowsServicos = servicos.map((s, index) => ({
-            id: `servico_${s.id}`,
-            title: s.nome,
-            description: `💰 R$ ${s.preco} | ⏳ ${s.duracao} min`
-        }));
-        
-        let secoes = [
-            {
-                title: 'Serviços de Cabelo e Barba',
-                rows: rowsServicos
-            },
-            {
-                title: 'Outras Opções',
-                rows: [{ id: 'cancelar', title: '❌ Cancelar atendimento' }]
-            }
-        ];
-
-        let mensagem = `👋 Olá, ${nomeWhatsApp}! Seja muito bem-vindo(a) à *Jonathan's Barber Shop*.\n\nÉ um prazer ter você aqui. Como podemos te ajudar hoje?`;
-        let rodape = 'Toque no botão acima para abrir o menu.\n(Se o botão não aparecer, envie o NÚMERO do serviço que deseja).';
-
-        const listaServicos = new List(mensagem, 'Ver Serviços', secoes, 'Agendamento Barbearia', rodape);
-        return client.sendMessage(msg.from, listaServicos);
-    }
-
-    // PASSO 2: ESCOLHENDO O SERVIÇO
-    if (estadosUsuarios[chatId] === 'ESCOLHENDO_SERVICO') {
-        
-        if (textoRecebido === '0' || msg.body === '❌ Cancelar atendimento') {
-            if (!numeroReal) { delete estadosUsuarios[chatId]; return msg.reply('❌ Não conseguimos identificar o seu número.'); }
-            const reservas = await prisma.horario.findMany({ where: { whatsapp: numeroReal, status: 'ocupado' } });
-            
-            if (reservas.length === 0) { delete estadosUsuarios[chatId]; return msg.reply('❌ Você não possui nenhum agendamento ativo.'); }
-
-            const dataCancelada = reservas[0].data; 
-
-            await prisma.horario.updateMany({
-                where: { whatsapp: numeroReal, status: 'ocupado' },
-                data: { status: 'disponivel', cliente: null, servico: null, whatsapp: null }
-            });
-
-            avisarFila(dataCancelada);
-
-            delete estadosUsuarios[chatId];
-            return msg.reply('✅ *Agendamento Cancelado!*\n\nSeus horários foram liberados com sucesso. Caso precise, estaremos à disposição! 👋');
-        }
-
-        const servicos = await prisma.servico.findMany({ orderBy: { id: 'asc' } });
-        
-        let nomesEscolhidos = [];
-        let tempoTotal = 0;
-
-        // Tenta achar o serviço pelo nome exato que o cliente clicou na lista
-        const servicoSelecionadoPelaLista = servicos.find(s => s.nome.toLowerCase() === textoRecebido);
-
-        if (servicoSelecionadoPelaLista) {
-            nomesEscolhidos.push(servicoSelecionadoPelaLista.nome);
-            tempoTotal += (servicoSelecionadoPelaLista.duracao || 30);
-        } else {
-            // Se o celular não tem suporte à lista e ele digitou números antigos, trata normalmente:
-            const numerosDigitados = textoRecebido.match(/\d+/g);
-            if (!numerosDigitados || numerosDigitados.length === 0) {
-                return msg.reply('❌ Opção inválida. Por favor, toque no botão da lista para escolher ou digite o número do serviço.');
-            }
-
-            for (let numStr of numerosDigitados) {
-                const index = parseInt(numStr) - 1;
-                const servico = servicos[index];
-                if (servico) {
-                    nomesEscolhidos.push(servico.nome);
-                    tempoTotal += (servico.duracao || 30);
-                }
-            }
-        }
-
-        if (nomesEscolhidos.length === 0) return msg.reply('❌ Opção inválida. Por favor, selecione os serviços corretamente.');
-
-        dadosTemporarios[chatId] = { 
-            servicoNome: nomesEscolhidos.join(' + '), 
-            blocosNecessarios: Math.ceil(tempoTotal / 15),
-            tempoTotal: tempoTotal
-        };
-
-        estadosUsuarios[chatId] = 'ESCOLHENDO_DATA';
-        return msg.reply(`✅ Excelente escolha! Você selecionou: *${dadosTemporarios[chatId].servicoNome}* (Duração aprox.: ${tempoTotal} min).\n\n📅 *Para qual data você gostaria de agendar?*\n_(Por favor, digite no formato Dia/Mês. Ex: 28/06)_`);
-    }
-
-    // PASSO 3: ESCOLHENDO DATA
-    if (estadosUsuarios[chatId] === 'ESCOLHENDO_DATA') {
-        const infoData = validarDataInput(textoRecebido);
-        
-        if (!infoData) return msg.reply('❌ Formato inválido. Por favor, envie a data no formato Dia/Mês (ex: 28/06).');
-        if (infoData.erro === 'PASSADO') return msg.reply('⏰ A data informada já passou. Por favor, insira uma data válida a partir de hoje.');
-        if (infoData.diaSemana === 0) return msg.reply('🗓️ Agradecemos a preferência, mas não temos expediente aos domingos. Por favor, escolha outra data.');
-
-        const dataString = infoData.string;
-        dadosTemporarios[chatId].dataEscolhida = dataString;
-
-        let todosHorarios = await prisma.horario.findMany({ where: { data: dataString }, orderBy: { id: 'asc' } });
-        
-        if (todosHorarios.length === 0) {
-            if (!gerandoAgendaLock[dataString]) {
-                gerandoAgendaLock[dataString] = true;
-                try {
-                    let hFim = (infoData.diaSemana === 6) ? '18:00' : '19:00'; 
-                    const novosSlots = gerarHorarios('09:00', hFim, 15);
-                    for (const slot of novosSlots) {
-                        await prisma.horario.create({ data: { ...slot, data: dataString } });
-                    }
-                } finally { delete gerandoAgendaLock[dataString]; }
-            } else {
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-            todosHorarios = await prisma.horario.findMany({ where: { data: dataString }, orderBy: { id: 'asc' } });
-        }
-
-        const blocosNecessarios = dadosTemporarios[chatId].blocosNecessarios;
-        let horariosValidos = [];
-        
-        for (let i = 0; i <= todosHorarios.length - blocosNecessarios; i++) {
-            let sequenciaLivre = true;
-            for (let j = 0; j < blocosNecessarios; j++) {
-                if (todosHorarios[i + j].status !== 'disponivel') {
-                    sequenciaLivre = false; break;
-                }
-            }
-            if (sequenciaLivre) horariosValidos.push(todosHorarios[i]);
-        }
-
-        const agora = new Date();
-        const hojeStr = `${String(agora.getDate()).padStart(2, '0')}/${String(agora.getMonth() + 1).padStart(2, '0')}/${agora.getFullYear()}`;
-        
-        if (dataString === hojeStr) {
-            const minutosAtuais = (agora.getHours() * 60) + agora.getMinutes();
-            horariosValidos = horariosValidos.filter(h => {
-                const [hora, min] = h.hora.split(':').map(Number);
-                const minutosSlot = (hora * 60) + min;
-                return minutosSlot > minutosAtuais;
-            });
-        }
-
-        if (horariosValidos.length === 0) {
-            dadosTemporarios[chatId].dataLotada = dataString;
-            estadosUsuarios[chatId] = 'FILA_ESPERA';
-            return msg.reply(`🗓️ Infelizmente, nossa agenda para o dia *${dataString}* já está totalmente preenchida para o tempo necessário (${dadosTemporarios[chatId].tempoTotal} min).\n\nGostaria de entrar em nossa *Fila de Espera*? Caso surja alguma desistência, nós te avisaremos imediatamente!\n\n*[ 1 ]* - Sim, por favor, me avise.\n*[ 2 ]* - Não, prefiro escolher outra data.`);
-        }
-
-        estadosUsuarios[chatId] = 'ESCOLHENDO_HORARIO';
-        let menuHorarios = `📅 *Horários Livres para ${dataString}:*\n\n`;
-        
-        horariosValidos.forEach((h, index) => {
-            menuHorarios += `*[ ${index + 1} ]* - ${h.hora}\n`;
-        });
-        
-        dadosTemporarios[chatId].mapaHorarios = horariosValidos.map(h => h.id);
-        menuHorarios += `\n👉 Digite o *NÚMERO* do horário desejado.`;
-        return msg.reply(menuHorarios);
-    }
-
-    // PASSO 3.5: DECISÃO DA FILA DE ESPERA
-    if (estadosUsuarios[chatId] === 'FILA_ESPERA') {
-        if (textoRecebido === '1') {
-            const dataFila = dadosTemporarios[chatId].dataLotada;
-            
-            if (!filaDeEspera[dataFila]) filaDeEspera[dataFila] = [];
-            if (!filaDeEspera[dataFila].includes(numeroReal)) filaDeEspera[dataFila].push(numeroReal);
-            
-            delete estadosUsuarios[chatId];
-            delete dadosTemporarios[chatId];
-            return msg.reply(`✅ Perfeito! Seu número foi adicionado à Fila de Espera para o dia *${dataFila}*.\n\nFique de olho no WhatsApp, caso surja uma vaga nós avisaremos imediatamente! 👋`);
-        } else {
-            estadosUsuarios[chatId] = 'ESCOLHENDO_DATA';
-            return msg.reply(`📅 Certo! Para qual *outra data* você gostaria de agendar?\n_(Ex: 28/06)_`);
-        }
-    }
-
-    // PASSO 4: ESCOLHENDO HORÁRIO
-    if (estadosUsuarios[chatId] === 'ESCOLHENDO_HORARIO') {
-        const escolhaIndex = parseInt(textoRecebido) - 1;
-        const mapaHorarios = dadosTemporarios[chatId].mapaHorarios || [];
-        const idHorarioCorreto = mapaHorarios[escolhaIndex];
-
-        const horario = await prisma.horario.findUnique({ where: { id: idHorarioCorreto || -1 } });
-        if (!horario) return msg.reply('❌ Horário inválido. Por favor, digite um dos números indicados na lista acima.');
-
-        dadosTemporarios[chatId].horarioId = horario.id;
-        dadosTemporarios[chatId].horarioHora = horario.hora;
-
-        estadosUsuarios[chatId] = 'DIGITANDO_NOME';
-        return msg.reply(`✅ Quase lá! O horário do dia *${dadosTemporarios[chatId].dataEscolhida}* às *${horario.hora}* foi pré-reservado para você.\n\n👤 Para finalizarmos o agendamento, por favor, digite apenas o seu *PRIMEIRO NOME*:`);
-    }
-
-    // PASSO 5: DIGITANDO O NOME E FINALIZANDO
-    if (estadosUsuarios[chatId] === 'DIGITANDO_NOME') {
-        const nomeDigitado = msg.body.trim(); 
-        const dados = dadosTemporarios[chatId];
-        const startId = dados.horarioId;
-        const blocos = dados.blocosNecessarios;
-
-        const slotsParaOcupar = await prisma.horario.findMany({
-            where: { id: { gte: startId, lt: startId + blocos } },
-            orderBy: { id: 'asc' }
-        });
-
-        const todosLivres = slotsParaOcupar.length === blocos && slotsParaOcupar.every(s => s.status === 'disponivel');
-
-        if (!todosLivres) {
-            delete estadosUsuarios[chatId]; delete dadosTemporarios[chatId];
-            return msg.reply('⚠️ Pedimos desculpas, mas este horário acabou de ser reservado por outro cliente. Por favor, envie "Oi" para iniciarmos novamente e escolher outro horário.');
-        }
-
-        await prisma.horario.updateMany({
-            where: { id: { in: slotsParaOcupar.map(s => s.id) } },
-            data: { status: 'ocupado', cliente: nomeDigitado, servico: dados.servicoNome, whatsapp: numeroReal }
-        });
-
-        const msgCliente = `🎉 *Agendamento Confirmado com Sucesso!*\n\n👤 *Cliente:* ${nomeDigitado}\n✂️ *Serviço(s):* ${dados.servicoNome}\n📅 *Data:* ${dados.dataEscolhida}\n🕒 *Horário:* ${dados.horarioHora}\n\nAgradecemos a preferência e aguardamos você no horário marcado! Até breve.`;
-        const msgBarbeiro = `🚨 *NOVO AGENDAMENTO!*\n\n👤 Cliente: *${nomeDigitado}*\n📱 Contato: ${numeroReal}\n✂️ Serviço: ${dados.servicoNome}\n📅 Data: ${dados.dataEscolhida}\n🕒 Horário: *${dados.horarioHora}*`;
-
-        await msg.reply(msgCliente);
-        
+    setInterval(async () => {
+        if (reconectando) return;
         try {
-            const idVerificado = await client.getNumberId(NUMERO_DO_BARBEIRO);
-            if (idVerificado) {
-                await client.sendMessage(idVerificado._serialized, msgBarbeiro);
+            const estado = await client.getState();
+            if (estado !== 'CONNECTED') {
+                log('Watchdog detectou estado anormal:', estado);
+                clienteConectado = false;
+                await reconectar();
+            } else if (!clienteConectado) {
+                clienteConectado = true;
+                log('Watchdog: conexão restabelecida.');
             }
         } catch (err) {
-            console.log("Erro ao notificar barbeiro:", err.message);
+            log('Watchdog não conseguiu ler o estado:', err.message);
+            clienteConectado = false;
+            await reconectar();
         }
+    }, 5 * 60 * 1000);
 
-        delete estadosUsuarios[chatId]; 
-        delete dadosTemporarios[chatId];
-        return;
+    log('Watchdog de conexão ativo (checagem a cada 5 min).');
+}
+
+// Limpa enquetes antigas da memória (evita crescimento infinito em execução longa)
+setInterval(() => {
+    const limite = Date.now() - 6 * 3600000;
+    for (const [id, reg] of Object.entries(enquetesPorMensagem)) {
+        if (reg.criadaEm < limite) delete enquetesPorMensagem[id];
+    }
+    for (const [chatId, reg] of Object.entries(ultimaEnquetePorChat)) {
+        if (reg.criadaEm < limite) delete ultimaEnquetePorChat[chatId];
+    }
+    if (votosProcessados.size > 5000) votosProcessados.clear();
+}, 60 * 60 * 1000);
+
+// ==========================================
+// VOTO NA ENQUETE (OPÇÃO CLICADA)
+// ==========================================
+client.on('vote_update', async (vote) => {
+    try {
+        const selecionadas = vote?.selectedOptions || [];
+        if (selecionadas.length === 0) return; // o cliente desmarcou a opção
+
+        const messageId = vote?.parentMessage?.id?._serialized;
+        const registro = messageId ? enquetesPorMensagem[messageId] : null;
+        const chatId = registro?.chatId || vote?.parentMessage?.to;
+        if (!chatId) return;
+
+        const labelEscolhido = selecionadas[0].name;
+        const chaveVoto = `${messageId}_${vote.voter}_${labelEscolhido}`;
+        if (votosProcessados.has(chaveVoto)) return;
+        votosProcessados.add(chaveVoto);
+
+        if (!(await botEstaAtivo())) return;
+
+        const opcoes = registro?.opcoes || ultimaEnquetePorChat[chatId]?.opcoes || [];
+        const opcao = opcoes.find(o => o.label === labelEscolhido);
+        if (!opcao) return;
+
+        log('Voto recebido de', chatId, '->', labelEscolhido);
+
+        let contato = null;
+        try { contato = await client.getContactById(chatId); } catch { /* segue sem contato */ }
+
+        await processarEscolha(chatId, opcao.id, contato);
+    } catch (err) {
+        log('Erro ao processar voto:', err.message);
     }
 });
 
+// ==========================================
+// MENSAGEM DE TEXTO (FALLBACK)
+// ==========================================
+client.on('message', async (msg) => {
+    try {
+        const chatId = msg.from;
+
+        // Filtros de ruído e de mensagens de sistema
+        const tiposSistema = ['e2e_notification', 'protocol', 'call_log', 'gp2', 'notification_template', 'poll_creation', 'vote'];
+        if (tiposSistema.includes(msg.type)) return;
+        if (msg.fromMe) return;
+        if (chatId.includes('@newsletter') || chatId.endsWith('@g.us') || chatId === 'status@broadcast') return;
+        if (chatId === NUMERO_DO_BARBEIRO + '@c.us') return;
+        if (numerosBloqueados.includes(chatId)) return;
+
+        if (!(await botEstaAtivo())) return;
+
+        if (msg.hasMedia || msg.type === 'audio' || msg.type === 'ptt') {
+            return msg.reply('🤖 Sou o assistente virtual da barbearia e ainda não consigo ouvir áudios nem ver imagens. Me envie sua mensagem em texto, por favor.');
+        }
+
+        const textoOriginal = (msg.body || '').trim();
+        const texto = textoOriginal.toLowerCase();
+        if (!texto || texto.startsWith('!')) return;
+
+        const contato = await msg.getContact().catch(() => null);
+        const nomeCliente = contato?.pushname || 'Cliente';
+
+        log('Mensagem de', chatId, '->', textoOriginal);
+
+        // Cancelar o agendamento já existente
+        if (texto === 'cancelar agendamento' || texto === 'desmarcar') {
+            return cancelarAgendamentoDoCliente(chatId, contato, msg);
+        }
+
+        // Sair do atendimento a qualquer momento
+        if (texto === 'cancelar' || texto === 'sair') {
+            encerrarAtendimento(chatId);
+            return msg.reply('❌ Atendimento cancelado. Quando quiser, é só mandar um "Oi".');
+        }
+
+        const estado = estadosUsuarios[chatId];
+
+        // Estados que esperam texto livre
+        if (estado === 'DIGITANDO_DATA') {
+            const info = validarDataInput(texto);
+            if (!info) return msg.reply('❌ Formato inválido. Digite a data como dia/mês.\n_Exemplo: 28/08_');
+            if (info.erro === 'PASSADO') return msg.reply('⏰ Essa data já passou. Escolha uma data a partir de hoje.');
+            if (info.diaSemana === 0) return msg.reply('🗓️ Não abrimos aos domingos. Escolha outra data, por favor.');
+            return enviarMenuHorarios(chatId, info.string, 0);
+        }
+
+        if (estado === 'DIGITANDO_NOME_TEXTO') {
+            const nome = textoOriginal.split(/\s+/)[0].substring(0, 40);
+            if (nome.length < 2) return msg.reply('Nome muito curto. Digite seu primeiro nome, por favor.');
+            return confirmarAgendamento(chatId, nome, contato);
+        }
+
+        if (estado === 'DIGITANDO_NOME') {
+            // Pode ter clicado na enquete de nome ou digitado o nome direto
+            const escolhaNome = resolverEscolhaPorTexto(chatId, texto);
+            if (escolhaNome) return processarEscolha(chatId, escolhaNome, contato);
+
+            const nome = textoOriginal.split(/\s+/)[0].substring(0, 40);
+            if (nome.length < 2) return msg.reply('Nome muito curto. Digite seu primeiro nome, por favor.');
+            return confirmarAgendamento(chatId, nome, contato);
+        }
+
+        // Demais estados: tenta casar o texto com a enquete ativa
+        if (estado) {
+            const escolha = resolverEscolhaPorTexto(chatId, texto);
+            if (escolha) return processarEscolha(chatId, escolha, contato);
+
+            const registro = ultimaEnquetePorChat[chatId];
+            if (registro) {
+                const menu = registro.opcoes.map((o, i) => `*[ ${i + 1} ]* - ${o.label}`).join('\n');
+                return msg.reply(`Não entendi 🤔\n\nToque em uma das opções da enquete acima, ou digite o número:\n\n${menu}`);
+            }
+        }
+
+        // Sem estado: inicia o atendimento
+        return enviarMenuServicos(chatId, nomeCliente);
+    } catch (err) {
+        log('Erro no handler de mensagem:', err.message);
+    }
+});
+
+async function cancelarAgendamentoDoCliente(chatId, contato, msg) {
+    const numeroReal = contato?.number || chatId.split('@')[0];
+
+    const reservas = await prisma.horario.findMany({
+        where: {
+            status: 'ocupado',
+            OR: [{ chatId: chatId }, { whatsapp: numeroReal }]
+        }
+    });
+
+    // Só cancela agendamentos futuros
+    const agora = new Date();
+    const futuras = reservas.filter(r => stringParaData(r.data, r.hora) > agora);
+
+    if (futuras.length === 0) {
+        encerrarAtendimento(chatId);
+        return msg.reply('Não encontramos nenhum agendamento futuro no seu número.');
+    }
+
+    const grupos = [...new Set(futuras.map(r => r.grupoId).filter(Boolean))];
+    const primeira = futuras.sort((a, b) => stringParaData(a.data, a.hora) - stringParaData(b.data, b.hora))[0];
+
+    await prisma.horario.updateMany({
+        where: grupos.length ? { grupoId: { in: grupos } } : { id: { in: futuras.map(r => r.id) } },
+        data: {
+            status: 'disponivel',
+            cliente: null, servico: null, whatsapp: null,
+            chatId: null, grupoId: null,
+            lembreteEnviado: false, feedbackEnviado: false
+        }
+    });
+
+    await avisarFila(primeira.data);
+    await notificarBarbeiro(`❌ *CANCELAMENTO*\n\nO cliente ${primeira.cliente || numeroReal} cancelou o horário de ${primeira.data} às ${primeira.hora}.`);
+
+    encerrarAtendimento(chatId);
+    return msg.reply('✅ Agendamento cancelado e horário liberado. Se quiser remarcar, envie um "Oi".');
+}
+
+// ==========================================
+// TRATAMENTO DE ERROS E DESLIGAMENTO
+// ==========================================
+const errosBenignos = ['Protocol error', 'Target closed', 'Session closed', 'Execution context was destroyed'];
+
+process.on('unhandledRejection', (reason) => {
+    log('Promise rejeitada sem tratamento:', reason?.message || String(reason));
+});
+
+process.on('uncaughtException', (err) => {
+    const texto = err?.message || String(err);
+    log('EXCEÇÃO NÃO TRATADA:', texto);
+
+    if (errosBenignos.some(e => texto.includes(e))) {
+        log('Erro conhecido do navegador. Mantendo o processo e deixando o watchdog agir.');
+        return;
+    }
+
+    log('Erro grave. Encerrando para o PM2 reiniciar limpo.');
+    setTimeout(() => process.exit(1), 1000);
+});
+
+async function desligar(sinal) {
+    log(`Recebido ${sinal}. Encerrando com segurança...`);
+    try { await client.destroy(); } catch {}
+    try { await prisma.$disconnect(); } catch {}
+    process.exit(0);
+}
+
+process.on('SIGINT', () => desligar('SIGINT'));
+process.on('SIGTERM', () => desligar('SIGTERM'));
+
+// ==========================================
+// INICIALIZAÇÃO
+// ==========================================
 app.listen(PORTA_API, '0.0.0.0', () => {
-    console.log(`🌐 [API]: Servidor Web ativo na porta: ${PORTA_API}`);
-    client.initialize();
+    log(`API ativa na porta ${PORTA_API}`);
+    client.initialize().catch(err => {
+        log('Falha ao inicializar o WhatsApp:', err.message);
+        process.exit(1);
+    });
 });
