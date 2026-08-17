@@ -42,6 +42,8 @@ const { PrismaClient } = require('@prisma/client');
 const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
+const https = require('https');
+const http = require('http');
 
 const prisma = new PrismaClient();
 const app = express();
@@ -55,6 +57,23 @@ app.use(express.json());
 // ==========================================
 const NUMERO_DO_BARBEIRO = process.env.NUMERO_BARBEIRO || '5573982105264';
 const CHROME_PATH = process.env.CHROME_PATH || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+
+// ==========================================
+// PUSH NO CELULAR DO BARBEIRO (ntfy)
+//
+// O bot roda no mesmo número de WhatsApp do barbeiro, e o WhatsApp não emite
+// notificação para mensagem que você mesmo enviou. Por isso os avisos
+// apareciam no chat mas nunca tocavam, e ele só descobria o agendamento ao
+// abrir o celular. O ntfy resolve isso por fora do WhatsApp.
+//
+// Defina NTFY_TOPIC no .env com um nome longo e aleatório: no servidor
+// público, qualquer pessoa que descubra o tópico consegue ler as
+// notificações. Por isso o push nunca leva telefone do cliente.
+//
+// Sem a variável, o push fica desligado e o bot segue funcionando igual.
+// ==========================================
+const NTFY_TOPIC = process.env.NTFY_TOPIC || '';
+const NTFY_SERVIDOR = process.env.NTFY_SERVIDOR || 'https://ntfy.sh';
 
 const NOME_BARBEARIA = "Jonathan's Barber Shop";
 const BLOCO_MINUTOS = 15;
@@ -801,16 +820,90 @@ async function confirmarAgendamento(chatId, nomeCliente, contato) {
         `🕒 Horário: *${dados.horarioHora}*`;
 
     await client.sendMessage(chatId, msgCliente);
-    await notificarBarbeiro(msgBarbeiro);
+    await notificarBarbeiro(msgBarbeiro, {
+        titulo: 'Novo agendamento',
+        // Sem telefone: o push passa por tópico público do ntfy.
+        // O contato completo continua no WhatsApp e no painel.
+        mensagem: `${nomeCliente} — ${dados.servicoNome}\n${dataString} às ${dados.horarioHora}`,
+        prioridade: 5, // urgente: fura o silencioso e o "não perturbe"
+        tags: ['scissors']
+    });
 
     log('Agendamento confirmado:', nomeCliente, dataString, dados.horarioHora);
     encerrarAtendimento(chatId);
 }
 
-async function notificarBarbeiro(mensagem) {
+// Dispara a notificação no celular do barbeiro pelo ntfy.
+// Nunca lança: falha de push não pode derrubar o agendamento do cliente.
+function enviarPush({ titulo, mensagem, prioridade = 4, tags = [] }) {
+    if (!NTFY_TOPIC) return Promise.resolve(false);
+
+    let alvo;
+    try {
+        alvo = new URL(NTFY_SERVIDOR);
+    } catch {
+        log('NTFY_SERVIDOR inválido, push ignorado:', NTFY_SERVIDOR);
+        return Promise.resolve(false);
+    }
+
+    return new Promise((resolve) => {
+        // Publicamos em JSON porque cabeçalho HTTP não aceita acento nem emoji,
+        // e o modo simples do ntfy manda título e prioridade justamente por
+        // cabeçalho. No corpo JSON o UTF-8 passa inteiro.
+        const corpo = Buffer.from(JSON.stringify({
+            topic: NTFY_TOPIC,
+            title: titulo,
+            message: mensagem,
+            priority: prioridade,
+            tags
+        }), 'utf8');
+
+        const transporte = alvo.protocol === 'http:' ? http : https;
+        const req = transporte.request({
+            hostname: alvo.hostname,
+            port: alvo.port || undefined,
+            path: '/',
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': corpo.length }
+        }, (res) => {
+            res.resume(); // sem isso o socket fica preso
+            const ok = res.statusCode >= 200 && res.statusCode < 300;
+            if (!ok) log('Push recusado pelo ntfy. HTTP', res.statusCode);
+            resolve(ok);
+        });
+
+        req.setTimeout(8000, () => req.destroy(new Error('tempo esgotado')));
+        req.on('error', (err) => {
+            log('Erro ao enviar push:', err.message);
+            resolve(false);
+        });
+        req.end(corpo);
+    });
+}
+
+// O parâmetro `push` é opcional. Quando vem preenchido, o aviso sai também
+// como notificação no celular. O texto do push é próprio e mais curto: ele
+// aparece na tela de bloqueio e não deve conter dado pessoal do cliente.
+async function notificarBarbeiro(mensagem, push = null) {
+    // Push primeiro: se o WhatsApp estiver lento ou caído, a notificação
+    // que realmente acorda o barbeiro já saiu.
+    if (push) {
+        await enviarPush({
+            titulo: push.titulo,
+            mensagem: push.mensagem || mensagem,
+            prioridade: push.prioridade,
+            tags: push.tags
+        });
+    }
+
     try {
         const idVerificado = await client.getNumberId(NUMERO_DO_BARBEIRO);
-        if (idVerificado) await client.sendMessage(idVerificado._serialized, mensagem);
+        if (!idVerificado) {
+            // Antes isso passava batido e o aviso sumia sem deixar rastro.
+            log('AVISO: número do barbeiro não encontrado no WhatsApp:', NUMERO_DO_BARBEIRO);
+            return;
+        }
+        await client.sendMessage(idVerificado._serialized, mensagem);
     } catch (err) {
         log('Erro ao notificar o barbeiro:', err.message);
     }
@@ -1011,7 +1104,14 @@ async function verificarResumoDiario() {
         if (porGrupo.size === 0) resumo += 'Nenhum agendamento por enquanto.';
         else for (const r of porGrupo.values()) resumo += `🕒 ${r.hora} - ${r.cliente} (${r.servico})\n`;
 
-        await notificarBarbeiro(resumo);
+        await notificarBarbeiro(resumo, {
+            titulo: `Agenda de hoje (${hojeStr})`,
+            mensagem: porGrupo.size === 0
+                ? 'Nenhum agendamento por enquanto.'
+                : `${porGrupo.size} agendamento(s) hoje. Veja a lista no WhatsApp.`,
+            prioridade: 3, // informativo: respeita o silencioso
+            tags: ['calendar']
+        });
         log('Resumo diário enviado.');
     } catch (err) {
         log('Erro no resumo diário:', err.message);
@@ -1158,6 +1258,24 @@ app.post('/api/bot/status', async (req, res) => {
 
 app.get('/api/bot/status', async (req, res) => {
     res.json({ ativo: await botEstaAtivo(), conectado: clienteConectado });
+});
+
+// Valida a entrega no celular do barbeiro sem precisar simular um
+// agendamento de verdade. Não responde qual é o tópico configurado.
+app.get('/api/teste-push', async (req, res) => {
+    if (!NTFY_TOPIC) {
+        return res.status(503).json({ ok: false, erro: 'NTFY_TOPIC não configurado no .env' });
+    }
+
+    const entregue = await enviarPush({
+        titulo: 'Teste de notificação',
+        mensagem: `Se você está lendo isso, o alerta de agendamento vai funcionar. (${new Date().toLocaleString('pt-BR')})`,
+        prioridade: 5,
+        tags: ['bell']
+    });
+
+    log('Teste de push solicitado. Entregue:', entregue);
+    res.status(entregue ? 200 : 502).json({ ok: entregue });
 });
 
 // ==========================================
@@ -1502,7 +1620,14 @@ async function cancelarAgendamentoDoCliente(chatId, contato) {
     });
 
     await avisarFila(primeira.data);
-    await notificarBarbeiro(`❌ *CANCELAMENTO*\n\nO cliente ${primeira.cliente || identificadores[0]} cancelou o horário de *${primeira.data}* às *${primeira.hora}* (${primeira.servico}).`);
+    await notificarBarbeiro(
+        `❌ *CANCELAMENTO*\n\nO cliente ${primeira.cliente || identificadores[0]} cancelou o horário de *${primeira.data}* às *${primeira.hora}* (${primeira.servico}).`,
+        {
+            titulo: 'Cancelamento',
+            mensagem: `${primeira.cliente || 'Cliente'} cancelou ${primeira.data} às ${primeira.hora}`,
+            prioridade: 4,
+            tags: ['x']
+        });
 
     log('Cancelado:', primeira.cliente, primeira.data, primeira.hora);
     encerrarAtendimento(chatId);
