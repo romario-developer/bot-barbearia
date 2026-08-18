@@ -44,6 +44,9 @@ const cors = require('cors');
 const crypto = require('crypto');
 const https = require('https');
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const { execFileSync } = require('child_process');
 
 const prisma = new PrismaClient();
 const app = express();
@@ -1257,7 +1260,18 @@ app.post('/api/bot/status', async (req, res) => {
 });
 
 app.get('/api/bot/status', async (req, res) => {
-    res.json({ ativo: await botEstaAtivo(), conectado: clienteConectado });
+    // `clienteConectado` sozinho é só uma flag movida por dois eventos: se a
+    // sessão morre em silêncio, ela continua verdadeira. Cruzamos com o estado
+    // real do WhatsApp, como o /health já fazia.
+    let estadoWpp = 'DESCONHECIDO';
+    try { estadoWpp = (await client.getState()) || 'SEM_ESTADO'; } catch { estadoWpp = 'INDISPONIVEL'; }
+
+    res.json({
+        ativo: await botEstaAtivo(),
+        conectado: clienteConectado && estadoWpp === 'CONNECTED',
+        pronto: clienteConectado,   // o cliente chegou a emitir 'ready'
+        whatsapp: estadoWpp         // o que a sessão diz neste instante
+    });
 });
 
 // Valida a entrega no celular do barbeiro sem precisar simular um
@@ -1346,7 +1360,24 @@ async function reconectar() {
     log('Tentando reconectar em 10 segundos...');
     await new Promise(r => setTimeout(r, 10000));
 
+    // A conexão pode ter voltado sozinha durante a espera. Em 18/08 foi o que
+    // aconteceu: o 'ready' disparou no meio dos 10 segundos e o destroy() abaixo
+    // derrubou uma sessão que já estava boa. O cliente novo autenticou, chegou a
+    // 100% e nunca emitiu 'ready' — o bot ficou de pé sem receber mensagem.
     try {
+        if (clienteConectado && (await client.getState()) === 'CONNECTED') {
+            reconectando = false;
+            log('A conexão se recuperou sozinha durante a espera. Reconexão cancelada.');
+            return;
+        }
+    } catch { /* sem estado legível: reconectar é o caminho seguro */ }
+
+    try {
+        // Só o 'ready' do cliente novo pode marcar isto como verdadeiro de novo.
+        // Sem zerar aqui, a flag do cliente antigo sobrevive e o watchdog passa a
+        // enxergar saúde onde não há.
+        clienteConectado = false;
+
         await client.destroy().catch(() => {});
         await client.initialize();
         log('Reconexão iniciada.');
@@ -1358,6 +1389,7 @@ async function reconectar() {
 }
 
 let watchdogAtivo = false;
+let ciclosSemFicarPronto = 0;
 function iniciarWatchdog() {
     if (watchdogAtivo) return;
     watchdogAtivo = true;
@@ -1366,14 +1398,30 @@ function iniciarWatchdog() {
         if (reconectando) return;
         try {
             const estado = await client.getState();
+
             if (estado !== 'CONNECTED') {
                 log('Watchdog detectou estado anormal:', estado);
                 clienteConectado = false;
-                await reconectar();
-            } else if (!clienteConectado) {
-                clienteConectado = true;
-                log('Watchdog: conexão restabelecida.');
+                return await reconectar();
             }
+
+            // Sessão CONNECTED sem o cliente ter emitido 'ready' é o caso zumbi:
+            // o processo fica de pé, o status diz que está tudo bem e nenhuma
+            // mensagem chega ao handler. Antes daqui saía um "conexão
+            // restabelecida" que só maquiava o problema. Esperamos dois ciclos
+            // para não agir sobre um boot que ainda está terminando.
+            if (!clienteConectado) {
+                ciclosSemFicarPronto++;
+                log('Watchdog: sessão conectada mas o cliente não ficou pronto. Ciclo', ciclosSemFicarPronto, 'de 2.');
+
+                if (ciclosSemFicarPronto >= 2) {
+                    log('Cliente preso sem ficar pronto. Reiniciando o processo.');
+                    process.exit(1); // PM2 sobe de novo, agora com a limpeza de órfãos no boot
+                }
+                return;
+            }
+
+            ciclosSemFicarPronto = 0;
         } catch (err) {
             log('Watchdog não conseguiu ler o estado:', err.message);
             clienteConectado = false;
@@ -1671,10 +1719,53 @@ process.on('SIGINT', () => desligar('SIGINT'));
 process.on('SIGTERM', () => desligar('SIGTERM'));
 
 // ==========================================
+// LIMPEZA DE NAVEGADOR ÓRFÃO
+//
+// O Chrome que o Puppeteer abre é processo independente: um `pm2 restart` mata
+// o Node e deixa o navegador vivo, segurando o perfil em .wwebjs_auth. O boot
+// seguinte morre com "The browser is already running" e o processo entra em
+// loop de reinício — foi o que tirou o bot do ar por 1h40 em 18/08.
+//
+// Fica aqui, e não no ecosystem.config.js, porque assim vale também para os
+// restarts automáticos do PM2 e para um `node index.js` na mão.
+//
+// O filtro é pelo caminho deste projeto: outros bots na mesma máquina mantêm
+// o Chrome deles intacto.
+// ==========================================
+function limparNavegadoresOrfaos() {
+    if (process.platform !== 'win32') return;
+
+    const perfil = path.join(__dirname, '.wwebjs_auth');
+
+    try {
+        const script =
+            `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+            `Where-Object { $_.CommandLine -like '*${perfil.replace(/'/g, "''")}*' } | ` +
+            `ForEach-Object { Stop-Process -Id $_.ProcessId -Force }`;
+
+        execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script],
+                     { stdio: 'ignore', timeout: 20000 });
+        log('Varredura de navegadores órfãos concluída.');
+    } catch (err) {
+        // Falhar aqui não impede o boot: se não havia órfão, o initialize segue normal.
+        log('Não foi possível varrer navegadores órfãos:', err.message);
+    }
+
+    // Travas que o Chrome deixa para trás ao morrer sem fechar direito. Enquanto
+    // elas existem, o perfil continua parecendo em uso.
+    for (const trava of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
+        try {
+            fs.rmSync(path.join(perfil, 'session', trava), { force: true, recursive: true });
+        } catch { /* não existia, que é o caso normal */ }
+    }
+}
+
+// ==========================================
 // INICIALIZAÇÃO
 // ==========================================
 app.listen(PORTA_API, '0.0.0.0', () => {
     log(`API ativa na porta ${PORTA_API}`);
+    limparNavegadoresOrfaos();
     client.initialize().catch(err => {
         log('Falha ao inicializar o WhatsApp:', err.message);
         process.exit(1);
